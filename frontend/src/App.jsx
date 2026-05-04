@@ -69,7 +69,7 @@ function Dashboard() {
               fontWeight: 800,
             }}
           >
-            ⚡
+            ∅
           </div>
           <span
             style={{
@@ -79,7 +79,7 @@ function Dashboard() {
               letterSpacing: "0.05em",
             }}
           >
-            IMS
+            NULLIFY
           </span>
           <span
             style={{
@@ -89,7 +89,7 @@ function Dashboard() {
               letterSpacing: "0.1em",
             }}
           >
-            INCIDENT MANAGEMENT
+            INCIDENTS, TERMINATED.
           </span>
         </div>
 

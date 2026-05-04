@@ -48,7 +48,7 @@ async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
                 {"title": "Component", "value": work_item.get("component", ""), "short": True},
                 {"title": "Priority", "value": priority, "short": True},
             ],
-            "footer": "IMS Alert",
+            "footer": "Nullify Alert",
         }]
     }
     try:

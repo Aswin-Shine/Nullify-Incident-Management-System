@@ -104,7 +104,7 @@ async def burst_signals(client: httpx.AsyncClient, component_id: str, count: int
 
 async def main():
     print("=" * 60)
-    print("IMS Mock Failure Scenario")
+    print("Nullify Mock Failure Scenario")
     print("Simulating: RDBMS outage → MCP cascade")
     print("=" * 60)
 

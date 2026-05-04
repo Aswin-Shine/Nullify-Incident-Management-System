@@ -1,4 +1,4 @@
-"""IMS FastAPI application — production entry point."""
+"""Nullify — Incident Management Platform. Production entry point."""
 from __future__ import annotations
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -25,20 +25,20 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_lim
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting IMS backend [env=%s]", settings.app_env)
+    logger.info("Starting Nullify backend [env=%s]", settings.app_env)
     await init_redis()
     await init_db()
     await start_ingestion_workers()
-    logger.info("IMS ready")
+    logger.info("Nullify ready")
     yield
-    logger.info("Shutting down IMS")
+    logger.info("Shutting down Nullify")
     await close_redis()
 
 
 app = FastAPI(
-    title="Incident Management System",
+    title="Nullify",
     version="2.0.0",
-    description="Production-grade IMS with PostgreSQL, Redis, JWT auth, Prometheus, OTel",
+    description="Nullify — Production-grade incident management with PostgreSQL, Redis, JWT auth, Prometheus, OTel",
     lifespan=lifespan,
 )
 

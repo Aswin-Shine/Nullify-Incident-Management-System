@@ -1,4 +1,4 @@
-"""Pydantic schemas for IMS."""
+"""Pydantic schemas for Nullify."""
 from __future__ import annotations
 from pydantic import BaseModel, field_validator, EmailStr
 from typing import Optional, Literal

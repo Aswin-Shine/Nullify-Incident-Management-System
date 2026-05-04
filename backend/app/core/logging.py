@@ -5,7 +5,7 @@ from pythonjsonlogger import jsonlogger
 from app.core.config import get_settings
 
 
-class IMSJsonFormatter(jsonlogger.JsonFormatter):
+class NullifyJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
         super().add_fields(log_record, record, message_dict)
         log_record["service"] = "ims-backend"
@@ -35,7 +35,7 @@ def setup_logging():
         handler.setFormatter(fmt)
     else:
         # JSON in staging/prod
-        handler.setFormatter(IMSJsonFormatter("%(asctime)s %(level)s %(name)s %(message)s"))
+        handler.setFormatter(NullifyJsonFormatter("%(asctime)s %(level)s %(name)s %(message)s"))
 
     root.addHandler(handler)
 

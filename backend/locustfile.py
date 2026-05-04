@@ -21,7 +21,7 @@ SIGNAL_TYPES = ["ERROR", "LATENCY_SPIKE", "TIMEOUT", "CONNECTION_REFUSED"]
 _token = None
 
 
-class IMSUser(HttpUser):
+class NullifyUser(HttpUser):
     wait_time = between(0.01, 0.05)  # ~20-100 req/sec per user
 
     def on_start(self):

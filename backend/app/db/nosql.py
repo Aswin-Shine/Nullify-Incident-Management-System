@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime
 
-LAKE_DIR = os.environ.get("IMS_LAKE_DIR", "datalake")
+LAKE_DIR = os.environ.get("NULLIFY_LAKE_DIR", "datalake")
 _lock = asyncio.Lock()
 
 

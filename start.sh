@@ -5,7 +5,7 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 echo "================================================"
-echo "  IMS — Incident Management System"
+echo "  Nullify — Incident Management Platform"
 echo "================================================"
 
 # ── Backend ──────────────────────────────────────────
