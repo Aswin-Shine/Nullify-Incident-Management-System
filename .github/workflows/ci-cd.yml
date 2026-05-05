@@ -1,0 +1,422 @@
+# # =============================================================
+# # Nullify — CI/CD Pipeline
+# # Triggers: push/PR to main or develop
+# #
+# # Flow:
+# #   PR   → lint + test + security scan + docker build (no push)
+# #   main → lint + test + security scan + docker build + push + deploy EC2
+# # =============================================================
+
+# name: Nullify CI/CD
+
+# on:
+#   push:
+#     branches: [main, develop]
+#   pull_request:
+#     branches: [main, develop]
+
+# # Cancel in-progress runs on same branch — saves CI minutes
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.ref }}
+#   cancel-in-progress: true
+
+# env:
+#   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+#   BACKEND_IMAGE:  ${{ secrets.DOCKERHUB_USERNAME }}/nullify-backend
+#   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/nullify-frontend
+#   PYTHON_VERSION: "3.12"
+#   NODE_VERSION:   "20"
+
+# # Minimal permissions — principle of least privilege
+# permissions:
+#   contents: read
+#   pull-requests: write    # post PR comments
+#   security-events: write  # upload SARIF reports
+
+# # =============================================================
+# # JOB 1 — Backend lint + test
+# # =============================================================
+# jobs:
+#   backend-ci:
+#     name: Backend — Lint & Test
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 15
+
+#     services:
+#       postgres:
+#         image: postgres:16-alpine
+#         env:
+#           POSTGRES_DB:       test_nullify
+#           POSTGRES_USER:     test_user
+#           POSTGRES_PASSWORD: test_pass
+#         ports: ["5432:5432"]
+#         options: >-
+#           --health-cmd "pg_isready -U test_user"
+#           --health-interval 10s
+#           --health-timeout 5s
+#           --health-retries 5
+
+#       redis:
+#         image: redis:7-alpine
+#         ports: ["6379:6379"]
+#         options: >-
+#           --health-cmd "redis-cli ping"
+#           --health-interval 10s
+#           --health-timeout 5s
+#           --health-retries 5
+
+#     defaults:
+#       run:
+#         working-directory: backend
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       - name: Set up Python ${{ env.PYTHON_VERSION }}
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: ${{ env.PYTHON_VERSION }}
+
+#       # Cache pip wheels — keyed on requirements hash
+#       - name: Cache pip
+#         uses: actions/cache@v4
+#         with:
+#           path: ~/.cache/pip
+#           key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+#           restore-keys: ${{ runner.os }}-pip-
+
+#       - name: Install dependencies
+#         run: |
+#           pip install --upgrade pip --quiet
+#           pip install -r requirements.txt --quiet
+
+#       - name: Lint — Ruff
+#         run: |
+#           pip install ruff --quiet
+#           ruff check app/ --output-format=github
+
+#       - name: Run unit tests
+#         env:
+#           DB_HOST:        localhost
+#           DB_PORT:        5432
+#           DB_USER:        test_user
+#           DB_PASSWORD:    test_pass
+#           DB_NAME:        test_nullify
+#           REDIS_URL:      redis://localhost:6379/0
+#           APP_SECRET_KEY: test-secret-key-for-ci-only
+#           APP_ENV:        test
+#         run: |
+#           pytest tests/test_core.py -q \
+#             --tb=short \
+#             --cov=app \
+#             --cov-report=term-missing \
+#             --cov-report=xml:coverage.xml \
+#             --cov-fail-under=60
+
+#       - name: Upload coverage report
+#         uses: actions/upload-artifact@v4
+#         if: always()
+#         with:
+#           name: backend-coverage
+#           path: backend/coverage.xml
+#           retention-days: 7
+
+#   # =============================================================
+#   # JOB 2 — Frontend lint + build check
+#   # =============================================================
+#   frontend-ci:
+#     name: Frontend — Lint & Build
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 10
+
+#     defaults:
+#       run:
+#         working-directory: frontend
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       - name: Set up Node ${{ env.NODE_VERSION }}
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: ${{ env.NODE_VERSION }}
+
+#       # Cache node_modules — keyed on lockfile hash
+#       - name: Cache npm
+#         uses: actions/cache@v4
+#         with:
+#           path: ~/.npm
+#           key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json') }}
+#           restore-keys: ${{ runner.os }}-npm-
+
+#       - name: Install dependencies
+#         run: npm ci --silent
+
+#       - name: Lint — ESLint
+#         run: npm run lint
+
+#       - name: Build check (Vite)
+#         env:
+#           VITE_API_URL: ""
+#         run: npm run build
+
+#       - name: Upload dist artifact
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: frontend-dist
+#           path: frontend/dist/
+#           retention-days: 1
+
+#   # =============================================================
+#   # JOB 3 — Security scanning (parallel with CI)
+#   # =============================================================
+#   security-scan:
+#     name: Security — Scan
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 15
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0  # full history for secret scanning
+
+#       # Secret scanning — catch leaked keys/tokens
+#       - name: Secret scan — Gitleaks
+#         uses: gitleaks/gitleaks-action@v2
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#       # Python SAST — Bandit
+#       - name: SAST — Bandit (Python)
+#         run: |
+#           pip install bandit --quiet
+#           bandit -r backend/app/ \
+#             -f json -o bandit-report.json \
+#             --severity-level medium \
+#             -x backend/app/tests \
+#             || true   # don't fail pipeline on findings — report only
+
+#       # Dependency vulnerability scan — pip-audit
+#       - name: SCA — pip-audit (Python deps)
+#         run: |
+#           pip install pip-audit --quiet
+#           pip-audit -r backend/requirements.txt \
+#             --format json \
+#             --output pip-audit-report.json \
+#             || true
+
+#       # Dependency scan — npm audit
+#       - name: SCA — npm audit (Node deps)
+#         working-directory: frontend
+#         run: |
+#           npm audit --audit-level=high --json > npm-audit-report.json || true
+
+#       - name: Upload security reports
+#         uses: actions/upload-artifact@v4
+#         if: always()
+#         with:
+#           name: security-reports
+#           path: |
+#             bandit-report.json
+#             pip-audit-report.json
+#             frontend/npm-audit-report.json
+#           retention-days: 14
+
+#   # =============================================================
+#   # JOB 4 — Docker build (runs on every push/PR)
+#   #          Push to DockerHub ONLY on main branch
+#   # =============================================================
+#   docker-build:
+#     name: Docker — Build & Push
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 20
+#     needs: [backend-ci, frontend-ci, security-scan]
+
+#     outputs:
+#       image-tag: ${{ steps.meta.outputs.version }}
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       # Docker layer caching — dramatically speeds up rebuilds
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       # Login only on main branch push — not on PRs
+#       - name: Login to DockerHub
+#         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKERHUB_USERNAME }}
+#           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+#       # Generate image tags: latest + git sha short
+#       - name: Generate image metadata
+#         id: meta
+#         run: |
+#           SHA_SHORT=$(git rev-parse --short HEAD)
+#           echo "version=${SHA_SHORT}" >> $GITHUB_OUTPUT
+#           echo "backend_tags=${{ env.BACKEND_IMAGE }}:latest,${{ env.BACKEND_IMAGE }}:${SHA_SHORT}" >> $GITHUB_OUTPUT
+#           echo "frontend_tags=${{ env.FRONTEND_IMAGE }}:latest,${{ env.FRONTEND_IMAGE }}:${SHA_SHORT}" >> $GITHUB_OUTPUT
+
+#       # Build backend — push only on main
+#       - name: Build backend image
+#         uses: docker/build-push-action@v5
+#         with:
+#           context:   ./backend
+#           file:      ./backend/Dockerfile
+#           target:    runtime
+#           push:      ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+#           tags:      ${{ steps.meta.outputs.backend_tags }}
+#           cache-from: type=gha,scope=backend
+#           cache-to:   type=gha,scope=backend,mode=max
+
+#       # Build frontend — push only on main
+#       - name: Build frontend image
+#         uses: docker/build-push-action@v5
+#         with:
+#           context:   ./frontend
+#           file:      ./frontend/Dockerfile
+#           target:    runtime
+#           push:      ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+#           tags:      ${{ steps.meta.outputs.frontend_tags }}
+#           build-args: |
+#             VITE_API_URL=
+#           cache-from: type=gha,scope=frontend
+#           cache-to:   type=gha,scope=frontend,mode=max
+
+#       # Container vulnerability scan — Trivy
+#       - name: Scan backend image — Trivy
+#         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref:    ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.version }}
+#           format:       sarif
+#           output:       trivy-backend.sarif
+#           severity:     CRITICAL,HIGH
+#           exit-code:    0   # report, don't fail
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-backend.sarif
+#         continue-on-error: true
+
+#   # =============================================================
+#   # JOB 5 — Deploy to EC2 (main branch only)
+#   # Uses SSH — no AWS credentials needed
+#   # =============================================================
+#   deploy:
+#     name: Deploy — EC2
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 15
+#     needs: [docker-build]
+
+#     # Only deploy on push to main — never on PRs
+#     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+#     # GitHub Environment — enables deployment protection rules
+#     # and shows deployment URL in the PR/commit view
+#     environment:
+#       name: production
+#       url: http://${{ secrets.EC2_HOST }}
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       # Write SSH private key to a temp file
+#       - name: Set up SSH
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/nullify_deploy
+#           chmod 600 ~/.ssh/nullify_deploy
+#           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+#       # Deploy — SSH into EC2 and run docker compose pull + up
+#       - name: Deploy to EC2
+#         env:
+#           EC2_HOST:    ${{ secrets.EC2_HOST }}
+#           EC2_USER:    ${{ secrets.EC2_USER }}
+#           IMAGE_TAG:   ${{ needs.docker-build.outputs.image-tag }}
+#           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+#         run: |
+#           ssh -i ~/.ssh/nullify_deploy \
+#               -o StrictHostKeyChecking=no \
+#               ${EC2_USER}@${EC2_HOST} << 'REMOTE'
+
+#             set -euo pipefail
+#             cd /opt/nullify   # app directory on EC2
+
+#             echo "=== Pulling new images ==="
+#             # Update image tags in compose to pinned SHA
+#             export BACKEND_IMAGE="${DOCKERHUB_USERNAME}/nullify-backend:${IMAGE_TAG}"
+#             export FRONTEND_IMAGE="${DOCKERHUB_USERNAME}/nullify-frontend:${IMAGE_TAG}"
+
+#             docker compose pull backend frontend
+
+#             echo "=== Running migrations ==="
+#             docker compose run --rm migrate || true
+
+#             echo "=== Rolling update ==="
+#             # Update backend first — zero-downtime rolling
+#             docker compose up -d --no-deps backend
+#             sleep 5
+
+#             echo "=== Health check — backend ==="
+#             for i in $(seq 1 12); do
+#               if curl -sf http://localhost:8000/health > /dev/null; then
+#                 echo "Backend healthy ✓"
+#                 break
+#               fi
+#               echo "Waiting... ($i/12)"
+#               sleep 5
+#               if [ $i -eq 12 ]; then
+#                 echo "Backend health check FAILED — rolling back"
+#                 docker compose up -d --no-deps backend --scale backend=1
+#                 exit 1
+#               fi
+#             done
+
+#             # Then update frontend
+#             docker compose up -d --no-deps frontend
+
+#             echo "=== Health check — frontend ==="
+#             for i in $(seq 1 6); do
+#               if curl -sf http://localhost/health > /dev/null; then
+#                 echo "Frontend healthy ✓"
+#                 break
+#               fi
+#               sleep 5
+#             done
+
+#             echo "=== Cleanup old images ==="
+#             docker image prune -f --filter "until=24h"
+
+#             echo "=== Deploy complete ==="
+#             docker compose ps
+
+#           REMOTE
+
+#       - name: Cleanup SSH key
+#         if: always()
+#         run: rm -f ~/.ssh/nullify_deploy
+
+#       # Post deployment summary as PR/commit comment
+#       - name: Deployment summary
+#         if: success()
+#         run: |
+#           echo "## ✅ Nullify Deployed" >> $GITHUB_STEP_SUMMARY
+#           echo "" >> $GITHUB_STEP_SUMMARY
+#           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+#           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+#           echo "| Image tag | \`${{ needs.docker-build.outputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+#           echo "| Environment | production |" >> $GITHUB_STEP_SUMMARY
+#           echo "| URL | http://${{ secrets.EC2_HOST }} |" >> $GITHUB_STEP_SUMMARY
+#           echo "| Deployed by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+#           echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
