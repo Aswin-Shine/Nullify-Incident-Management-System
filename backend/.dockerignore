@@ -1,0 +1,19 @@
+# backend/.dockerignore
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+.env
+.env.*
+!.env.example
+tests/
+locustfile.py
+data_lake/
+*.log
+.git/
+.gitignore
