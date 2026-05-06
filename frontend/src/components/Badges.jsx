@@ -1,34 +1,42 @@
-export function PriorityBadge({ priority }) {
+import React from 'react';
+export const PriorityBadge = ({ priority }) => {
   const colors = {
-    P0: { color: 'var(--p0)', bg: 'var(--p0-bg)', label: 'P0 CRITICAL' },
-    P1: { color: 'var(--p1)', bg: 'var(--p1-bg)', label: 'P1 HIGH' },
-    P2: { color: 'var(--p2)', bg: 'var(--p2-bg)', label: 'P2 MEDIUM' },
-    P3: { color: 'var(--p3)', bg: 'var(--p3-bg)', label: 'P3 LOW' },
+    P0: { text: 'var(--p0-color)', bg: 'var(--p0-bg)', border: 'rgba(248,113,113,0.3)', label: 'P0 Critical' },
+    P1: { text: 'var(--p1-color)', bg: 'var(--p1-bg)', border: 'rgba(251,146,60,0.3)',  label: 'P1 High' },
+    P2: { text: 'var(--p2-color)', bg: 'var(--p2-bg)', border: 'rgba(251,191,36,0.3)',  label: 'P2 Medium' },
+    P3: { text: 'var(--p3-color)', bg: 'var(--p3-bg)', border: 'rgba(52,211,153,0.3)',  label: 'P3 Low' },
   };
   const c = colors[priority] || colors.P3;
   return (
     <span style={{
-      fontFamily: 'var(--mono)', fontSize: '11px', fontWeight: 700,
-      color: c.color, background: c.bg,
-      border: `1px solid ${c.color}33`,
-      padding: '2px 8px', borderRadius: '3px', letterSpacing: '0.05em',
-      whiteSpace: 'nowrap',
-    }}>{c.label}</span>
+      fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+      background: c.bg, color: c.text, border: `1px solid ${c.border}`,
+      whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center',
+    }}>
+      {c.label}
+    </span>
   );
-}
+};
 
-export function StatusBadge({ status }) {
+export const StatusBadge = ({ status }) => {
   const colors = {
-    OPEN: '#ff3b3b', INVESTIGATING: '#f5c518',
-    RESOLVED: '#4ade80', CLOSED: '#5c6275',
+    OPEN:          'var(--status-open)',
+    INVESTIGATING: 'var(--status-investigating)',
+    RESOLVED:      'var(--status-resolved)',
+    CLOSED:        'var(--status-closed)',
   };
-  const color = colors[status] || '#5c6275';
+  const col = colors[status] || colors.CLOSED;
   return (
     <span style={{
-      fontFamily: 'var(--mono)', fontSize: '11px', fontWeight: 700,
-      color, background: `${color}15`,
-      border: `1px solid ${color}44`,
-      padding: '2px 8px', borderRadius: '3px',
-    }}>{status}</span>
+      fontSize: 11, fontWeight: 600, color: col,
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+    }}>
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%', background: col,
+        display: 'inline-block', flexShrink: 0,
+        animation: status === 'INVESTIGATING' ? 'pulseDot 1.8s ease-in-out infinite' : 'none',
+      }} />
+      {status}
+    </span>
   );
-}
+};

@@ -1,79 +1,76 @@
-import { useState, useEffect } from 'react'
-import { fetchComments, addComment } from '../api/client'
-import { formatDistanceToNow } from 'date-fns'
+import React, { useState, useEffect } from 'react';
+import { formatDistanceToNow } from 'date-fns';
+import { fetchComments, addComment } from '../api/client';
 
 export function CommentsSection({ wiId }) {
-  const [comments, setComments] = useState([])
-  const [body, setBody] = useState('')
-  const [posting, setPosting] = useState(false)
-  const [error, setError] = useState('')
+  const [comments, setComments] = useState([]);
+  const [newComment, setNewComment] = useState('');
+  const [posting, setPosting] = useState(false);
 
   const load = async () => {
     try {
-      setComments(await fetchComments(wiId))
-    } catch {}
-  }
+      const data = await fetchComments(wiId);
+      setComments(data);
+    } catch (e) { console.error(e); }
+  };
 
-  useEffect(() => { load() }, [wiId])
+  useEffect(() => { load(); }, [wiId]);
 
-  const post = async () => {
-    if (!body.trim()) return
-    setPosting(true); setError('')
+  const handlePost = async () => {
+    if (!newComment.trim()) return;
+    setPosting(true);
     try {
-      await addComment(wiId, body)
-      setBody('')
-      await load()
-    } catch (e) {
-      setError(e.response?.data?.detail || 'Failed to post')
-    } finally { setPosting(false) }
-  }
+      await addComment(wiId, newComment);
+      setNewComment('');
+      await load();
+    } catch (e) { console.error(e); }
+    finally { setPosting(false); }
+  };
 
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-2)', letterSpacing: '0.1em', marginBottom: 12 }}>
-        COMMENTS ({comments.length})
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 24 }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700 }}>Timeline</h3>
+        <span style={{ fontSize: 11, background: 'var(--bg-raised)', padding: '2px 8px', borderRadius: 10, color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+          {comments.length}
+        </span>
       </div>
 
-      {comments.map(c => (
-        <div key={c.id} style={{
-          marginBottom: 10, padding: '10px 12px',
-          background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 4,
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)' }}>
-              @{c.author_username || c.author_id.slice(0, 8)}
-            </span>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-2)' }}>
-              {formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}
-            </span>
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--text-0)' }}>{c.body}</div>
+      <div style={{ position: 'relative', paddingLeft: 24 }}>
+        {comments.length > 0 && <div style={{ position: 'absolute', left: 7, top: 0, bottom: 0, width: 2, background: 'var(--border-subtle)' }} />}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {comments.length === 0 && <p style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>No comments yet.</p>}
+          {comments.map(c => (
+            <div key={c.id} style={{ position: 'relative', animation: 'slideDown 0.2s' }}>
+              <div style={{ position: 'absolute', left: -23, top: 4, width: 14, height: 14, borderRadius: '50%', background: 'var(--bg-overlay)', border: '2px solid var(--accent)' }} />
+              <div style={{ background: 'var(--bg-raised)', padding: '12px 16px', borderRadius: '12px 12px 12px 4px', border: '1px solid var(--border-subtle)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, gap: 8 }}>
+                  {/* FIX: backend returns author, not username */}
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{c.author || c.username || 'User'}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatDistanceToNow(new Date(c.created_at), { addSuffix: true })}</span>
+                </div>
+                <p style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{c.body}</p>
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      </div>
 
-      {comments.length === 0 && (
-        <div style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)', fontSize: 12, marginBottom: 12 }}>
-          no comments yet
+      {/* Input */}
+      <div style={{ marginTop: 24, background: 'var(--bg-surface)', padding: 16, borderRadius: 16, border: '1px solid var(--border-default)' }}>
+        <textarea
+          placeholder="Add a comment… (Ctrl+Enter to post)"
+          style={{ width: '100%', border: 'none', background: 'transparent', minHeight: 64, resize: 'none', boxShadow: 'none' }}
+          value={newComment}
+          onChange={e => setNewComment(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handlePost(); }}
+        />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+          <button onClick={handlePost} disabled={!newComment.trim() || posting} className="btn btn-primary" style={{ padding: '6px 20px', borderRadius: 20, fontSize: 13 }}>
+            {posting ? <span className="spinner" /> : 'Post'}
+          </button>
         </div>
-      )}
-
-      <textarea
-        placeholder="Add a comment..."
-        value={body}
-        onChange={e => setBody(e.target.value)}
-        style={{ marginTop: 8 }}
-        onKeyDown={e => { if (e.key === 'Enter' && e.ctrlKey) post() }}
-      />
-      {error && <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--p0)', marginTop: 4 }}>{error}</div>}
-      <button onClick={post} disabled={posting || !body.trim()}
-        style={{
-          marginTop: 8, padding: '7px 16px', borderRadius: 3, fontSize: 11,
-          background: 'var(--accent-bg)', color: 'var(--accent-hover)',
-          border: '1px solid var(--accent)',
-          opacity: !body.trim() ? 0.4 : 1,
-        }}>
-        {posting ? 'POSTING...' : 'POST (Ctrl+Enter)'}
-      </button>
+      </div>
     </div>
-  )
+  );
 }

@@ -1,4 +1,3 @@
-"""Redis hot-path cache — replaces in-memory dict."""
 from __future__ import annotations
 import json
 import logging

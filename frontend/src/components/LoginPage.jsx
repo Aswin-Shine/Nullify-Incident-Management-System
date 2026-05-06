@@ -1,203 +1,84 @@
-import { useState } from "react";
-import { useAuth } from "../context/AuthContext";
-import { register } from "../api/client";
+import React, { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { register as apiRegister } from '../api/client';
 
 export function LoginPage() {
-  const { login } = useAuth();
-  const [mode, setMode] = useState("login"); // login | register
-  const [form, setForm] = useState({
-    username: "",
-    email: "",
-    password: "",
-    role: "sre",
-  });
-  const [error, setError] = useState("");
+  const [isRegister, setIsRegister] = useState(false);
+  const [formData, setFormData] = useState({ username: '', password: '', email: '', role: 'sre' });
+  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
 
-  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-
-  const submit = async () => {
-    setError("");
-    setLoading(true);
+  const handleSubmit = async () => {
+    setError(''); setLoading(true);
     try {
-      if (mode === "register") {
-        await register(form);
-        setMode("login");
-        setError("");
-        return;
+      if (isRegister) {
+        await apiRegister(formData);
+        setIsRegister(false);
+      } else {
+        await login(formData.username, formData.password);
       }
-      await login(form.username, form.password);
-    } catch (e) {
-      setError(e.response?.data?.detail || "Failed");
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Authentication failed');
+    } finally { setLoading(false); }
   };
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "var(--bg-0)",
-      }}
-    >
-      <div
-        style={{
-          width: 380,
-          background: "var(--bg-1)",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          padding: 32,
-        }}
-      >
+    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)' }}>
+      <div className="glass" style={{ width: '100%', maxWidth: 400, padding: 40, borderRadius: 24, boxShadow: '0 32px 80px rgba(0,0,0,0.4)', animation: 'slideDown 0.4s ease-out' }}>
+
         {/* Logo */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            marginBottom: 32,
-          }}
-        >
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              background: "var(--accent)",
-              borderRadius: 8,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 18,
-            }}
-          >
-            ∅
-          </div>
+        <div style={{ textAlign: 'center', marginBottom: 36 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 14, background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, margin: '0 auto 16px', boxShadow: '0 0 24px var(--accent-glow)', animation: 'glowPulse 3s ease-in-out infinite' }}>∅</div>
+          <h1 style={{ fontSize: 32, fontWeight: 800, color: 'var(--text-primary)' }}>Nullify</h1>
+          <p style={{ fontSize: 13, color: 'var(--text-tertiary)', marginTop: 4 }}>Incidents, terminated.</p>
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', background: 'var(--bg-raised)', borderRadius: 12, padding: 4, marginBottom: 28 }}>
+          {[['login', 'Sign In'], ['register', 'Register']].map(([m, label]) => (
+            <div key={m} onClick={() => { setIsRegister(m === 'register'); setError(''); }}
+              style={{ flex: 1, textAlign: 'center', padding: 8, borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, transition: 'all 0.2s', background: (isRegister ? m === 'register' : m === 'login') ? 'var(--accent)' : 'transparent', color: (isRegister ? m === 'register' : m === 'login') ? 'white' : 'var(--text-secondary)' }}>
+              {label}
+            </div>
+          ))}
+        </div>
+
+        {/* Fields */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>
-            <div
-              style={{
-                fontFamily: "var(--mono)",
-                fontWeight: 700,
-                fontSize: 15,
-              }}
-            >
-              NULLIFY
-            </div>
-            <div
-              style={{
-                fontFamily: "var(--mono)",
-                fontSize: 9,
-                color: "var(--text-2)",
-                letterSpacing: "0.1em",
-              }}
-            >
-              INCIDENTS, TERMINATED.
-            </div>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Username</label>
+            <input type="text" value={formData.username} onChange={e => setFormData({ ...formData, username: e.target.value })} onKeyDown={e => e.key === 'Enter' && handleSubmit()} placeholder="Enter username" />
           </div>
-        </div>
-
-        <div
-          style={{
-            fontFamily: "var(--mono)",
-            fontSize: 11,
-            color: "var(--text-2)",
-            letterSpacing: "0.1em",
-            marginBottom: 20,
-          }}
-        >
-          {mode === "login" ? "SIGN IN" : "CREATE ACCOUNT"}
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input
-            placeholder="Username"
-            value={form.username}
-            onChange={(e) => set("username", e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-
-          {mode === "register" && (
-            <>
-              <input
-                placeholder="Email"
-                type="email"
-                value={form.email}
-                onChange={(e) => set("email", e.target.value)}
-              />
-              <select
-                value={form.role}
-                onChange={(e) => set("role", e.target.value)}
-              >
+          {isRegister && (
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Email</label>
+              <input type="email" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} placeholder="you@company.com" />
+            </div>
+          )}
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Password</label>
+            <input type="password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} onKeyDown={e => e.key === 'Enter' && handleSubmit()} placeholder="••••••••" />
+          </div>
+          {isRegister && (
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Role</label>
+              <select value={formData.role} onChange={e => setFormData({ ...formData, role: e.target.value })}>
                 <option value="viewer">Viewer</option>
                 <option value="sre">SRE</option>
                 <option value="admin">Admin</option>
               </select>
-            </>
+            </div>
           )}
 
-          <input
-            placeholder="Password"
-            type="password"
-            value={form.password}
-            onChange={(e) => set("password", e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-        </div>
+          {error && (
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--p0-bg)', color: 'var(--error)', fontSize: 12, animation: 'slideDown 0.2s', border: '1px solid rgba(248,113,113,0.2)' }}>
+              {error}
+            </div>
+          )}
 
-        {error && (
-          <div
-            style={{
-              marginTop: 10,
-              fontFamily: "var(--mono)",
-              fontSize: 11,
-              color: "var(--p0)",
-              padding: "8px 12px",
-              background: "var(--p0-bg)",
-              borderRadius: 4,
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        <button
-          onClick={submit}
-          disabled={loading}
-          style={{
-            marginTop: 16,
-            width: "100%",
-            padding: 10,
-            borderRadius: 4,
-            background: loading ? "var(--bg-3)" : "var(--accent-bg)",
-            color: loading ? "var(--text-2)" : "var(--accent-hover)",
-            border: "1px solid var(--accent)",
-            fontSize: 12,
-          }}
-        >
-          {loading
-            ? "PLEASE WAIT..."
-            : mode === "login"
-              ? "SIGN IN"
-              : "REGISTER"}
-        </button>
-
-        <div style={{ marginTop: 16, textAlign: "center" }}>
-          <button
-            onClick={() => {
-              setMode((m) => (m === "login" ? "register" : "login"));
-              setError("");
-            }}
-            style={{
-              background: "transparent",
-              color: "var(--text-2)",
-              fontSize: 11,
-              fontFamily: "var(--mono)",
-            }}
-          >
-            {mode === "login" ? "Create account →" : "← Back to login"}
+          <button onClick={handleSubmit} disabled={loading} className="btn btn-primary" style={{ height: 44, marginTop: 10, width: '100%', fontFamily: "'Plus Jakarta Sans', sans-serif", fontWeight: 600, fontSize: 14 }}>
+            {loading ? <span className="spinner" /> : (isRegister ? 'Create Account' : 'Sign In')}
           </button>
         </div>
       </div>

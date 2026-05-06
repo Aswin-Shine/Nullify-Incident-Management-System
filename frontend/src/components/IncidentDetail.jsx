@@ -1,451 +1,178 @@
-import { useState, useEffect } from "react";
-import {
-  fetchWorkItem,
-  fetchSignals,
-  updateStatus,
-  assignWorkItem,
-  listUsers,
-} from "../api/client";
-import { PriorityBadge, StatusBadge } from "./Badges";
-import { RCAForm } from "./RCAForm";
-import { CommentsSection } from "./CommentsSection";
-import { formatDistanceToNow, formatDistance, isPast } from "date-fns";
-import { useAuth } from "../context/AuthContext";
+import React, { useState, useEffect } from 'react';
+import { formatDistanceToNow } from 'date-fns';
+import { PriorityBadge, StatusBadge } from './Badges';
+import { RCAForm } from './RCAForm';
+import { CommentsSection } from './CommentsSection';
+import { fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
-const TRANSITIONS = {
-  OPEN: ["INVESTIGATING"],
-  INVESTIGATING: ["RESOLVED"],
-  RESOLVED: ["CLOSED"],
-  CLOSED: [],
-};
+function avatarColor(name = '') {
+  const hash = [...name].reduce((acc, c) => c.charCodeAt(0) + ((acc << 5) - acc), 0);
+  return `hsl(${Math.abs(hash) % 360}, 60%, 55%)`;
+}
 
-function SLATimer({ deadline, status }) {
+function fmtMTTR(s) {
+  if (!s) return null;
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+
+function SlaChip({ deadline, status }) {
   const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  if (!deadline || ["RESOLVED", "CLOSED"].includes(status)) return null;
-  const dl = new Date(deadline);
-  const breached = isPast(dl);
-  const dist = formatDistance(dl, now, { addSuffix: !breached });
-  return (
-    <span
-      style={{
-        fontFamily: "var(--mono)",
-        fontSize: 10,
-        color: breached ? "var(--p0)" : "var(--p2)",
-        background: breached ? "var(--p0-bg)" : "rgba(245,197,24,0.08)",
-        border: `1px solid ${breached ? "var(--p0)44" : "var(--p2)44"}`,
-        padding: "2px 8px",
-        borderRadius: 3,
-        animation: breached ? "pulse 1.5s infinite" : "none",
-      }}
-    >
-      {breached ? `⚠ SLA BREACHED ${dist}` : `⏱ SLA: ${dist}`}
-    </span>
-  );
+  useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+  if (!deadline || ['RESOLVED', 'CLOSED'].includes(status)) return null;
+  const diff = new Date(deadline) - now;
+  if (diff <= 0) return <span style={{ padding: '4px 12px', borderRadius: 20, background: 'var(--p0-bg)', color: 'var(--p0-color)', fontSize: 11, fontWeight: 700, animation: 'pulse 1.5s infinite' }}>SLA BREACHED</span>;
+  const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
+  const col = diff < 300000 ? 'var(--p0-color)' : diff < 1800000 ? 'var(--p2-color)' : 'var(--p3-color)';
+  const bg  = diff < 300000 ? 'var(--p0-bg)' : diff < 1800000 ? 'var(--p2-bg)' : 'var(--p3-bg)';
+  return <span style={{ padding: '4px 12px', borderRadius: 20, background: bg, color: col, fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>SLA {h > 0 ? `${h}h ` : ''}{m}m {s}s</span>;
 }
 
 export function IncidentDetail({ id, onRefresh }) {
   const { user } = useAuth();
-  const [item, setItem] = useState(null);
-  const [signals, setSignals] = useState([]);
-  const [tab, setTab] = useState("overview");
-  const [transitioning, setTransitioning] = useState(false);
-  const [error, setError] = useState("");
-  const [users, setUsers] = useState([]);
-
-  const canWrite = user?.role === "sre" || user?.role === "admin";
+  const [incident, setIncident]       = useState(null);
+  const [signals, setSignals]         = useState([]);
+  const [users, setUsers]             = useState([]);
+  const [rcaExists, setRcaExists]     = useState(false);
+  const [signalsOpen, setSignalsOpen] = useState(false);
+  const [transitioning, setTransit]   = useState(null);
+  const [loading, setLoading]         = useState(false);
 
   const load = async () => {
     if (!id) return;
-    const [wi, sigs] = await Promise.all([fetchWorkItem(id), fetchSignals(id)]);
-    setItem(wi);
-    setSignals(sigs);
+    setLoading(true);
+    try {
+      // FIX: use fetchWorkItem → /api/work-items/:id (not /api/incidents/:id)
+      const wi = await fetchWorkItem(id);
+      setIncident(wi);
+      // supplementary — don't block main load
+      fetchSignals(id).then(setSignals).catch(() => {});
+      listUsers().then(setUsers).catch(() => {});
+      fetchRCA(id).then(r => setRcaExists(!!r)).catch(() => {});
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
   };
 
-  useEffect(() => {
-    load();
-  }, [id]);
-
-  useEffect(() => {
-    if (canWrite)
-      listUsers()
-        .then(setUsers)
-        .catch(() => {});
-  }, [canWrite]);
+  useEffect(() => { load(); setIncident(null); }, [id]);
 
   const doTransition = async (newStatus) => {
-    setError("");
-    setTransitioning(true);
+    if (newStatus === 'CLOSED' && !rcaExists) return;
+    setTransit(newStatus);
     try {
+      // FIX: updateStatus → PATCH /api/work-items/:id/status
       await updateStatus(id, newStatus);
-      await load();
-      onRefresh?.();
-    } catch (e) {
-      setError(e.response?.data?.detail || "Failed");
-    } finally {
-      setTransitioning(false);
-    }
+      await load(); onRefresh?.();
+    } catch (e) { console.error(e); }
+    finally { setTransit(null); }
   };
 
-  const doAssign = async (assigneeId) => {
-    try {
-      await assignWorkItem(id, assigneeId || null);
-      await load();
-      onRefresh?.();
-    } catch (e) {
-      setError(e.response?.data?.detail || "Assign failed");
-    }
+  if (!id) return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', gap: 12 }}>
+      <div style={{ fontSize: 64, opacity: 0.15 }}>∅</div>
+      <h3 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-secondary)' }}>Select an incident</h3>
+      <p style={{ fontSize: 13 }}>Real-time telemetry will appear here.</p>
+    </div>
+  );
+
+  if (loading && !incident) return (
+    <div style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {[200, 140, 100].map((w, i) => <div key={i} className="shimmer" style={{ height: 20, width: w }} />)}
+    </div>
+  );
+
+  if (!incident) return null;
+
+  const assignedUser = users.find(u => u.id === incident.assignee_id);
+  const mttr = fmtMTTR(incident.mttr_seconds);
+  const transitions = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] }[incident.status] || [];
+  const transStyle = {
+    INVESTIGATING: { bg: 'var(--p2-bg)', color: 'var(--p2-color)', label: 'Start Investigating' },
+    RESOLVED:      { bg: 'var(--p3-bg)', color: 'var(--success)',   label: 'Mark Resolved' },
+    CLOSED:        { bg: 'var(--bg-raised)', color: 'var(--text-secondary)', label: 'Close Incident' },
   };
-
-  if (!id)
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          color: "var(--text-2)",
-          fontFamily: "var(--mono)",
-          fontSize: 12,
-        }}
-      >
-        ← select incident
-      </div>
-    );
-  if (!item)
-    return (
-      <div
-        style={{
-          padding: 24,
-          color: "var(--text-2)",
-          fontFamily: "var(--mono)",
-          fontSize: 12,
-        }}
-      >
-        loading...
-      </div>
-    );
-
-  const nextStates = TRANSITIONS[item.status] || [];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* Header */}
-      <div
-        style={{
-          padding: "16px 20px",
-          borderBottom: "1px solid var(--border)",
-          background: "var(--bg-1)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            marginBottom: 8,
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
-          <PriorityBadge priority={item.priority} />
-          <StatusBadge status={item.status} />
-          <SLATimer deadline={item.sla_deadline} status={item.status} />
+    <div style={{ padding: '28px 32px', overflowY: 'auto', height: '100%', animation: 'slideDown 0.3s' }}>
+
+      {/* Header card */}
+      <div className="glass" style={{ padding: 24, borderRadius: 16, marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+          <PriorityBadge priority={incident.priority} />
+          <StatusBadge status={incident.status} />
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            {mttr && <span style={{ padding: '4px 10px', borderRadius: 6, background: 'var(--p3-bg)', color: 'var(--success)', fontSize: 11, fontWeight: 600 }}>MTTR: {mttr}</span>}
+            <SlaChip deadline={incident.sla_deadline} status={incident.status} />
+          </div>
         </div>
-        <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>
-          {item.title}
-        </div>
-        <div
-          style={{
-            fontFamily: "var(--mono)",
-            fontSize: 11,
-            color: "var(--text-2)",
-            display: "flex",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <span>{item.component}</span>
-          <span>
-            {formatDistanceToNow(new Date(item.created_at), {
-              addSuffix: true,
-            })}
-          </span>
-          {item.mttr_seconds && (
-            <span style={{ color: "var(--p3)" }}>
-              MTTR: {Math.round(item.mttr_seconds / 60)}m
-            </span>
-          )}
-          {item.assignee_username ? (
-            <span style={{ color: "var(--accent)" }}>
-              👤 {item.assignee_username}
-            </span>
+
+        {/* FIX: component_id, not component */}
+        <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{incident.component_id}</h1>
+        <p style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-tertiary)', marginBottom: 20, fontVariantNumeric: 'tabular-nums' }}>
+          #{incident.id} · Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}
+        </p>
+
+        {/* Assignee */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+          {assignedUser ? (
+            <>
+              <div style={{ width: 24, height: 24, borderRadius: '50%', background: avatarColor(assignedUser.username), color: '#fff', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {assignedUser.username[0].toUpperCase()}
+              </div>
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Assigned to <strong style={{ color: 'var(--text-primary)' }}>{assignedUser.username}</strong></span>
+            </>
           ) : (
-            <span style={{ color: "var(--text-2)" }}>unassigned</span>
+            <select onChange={e => { if (e.target.value) assignWorkItem(id, e.target.value).then(load); }} defaultValue="" style={{ width: 'auto', maxWidth: 220 }}>
+              <option value="" disabled>Unassigned — assign to…</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
+            </select>
           )}
         </div>
-        {item.description && (
-          <div
-            style={{
-              marginTop: 8,
-              fontSize: 13,
-              color: "var(--text-1)",
-              fontStyle: "italic",
-            }}
-          >
-            {item.description}
-          </div>
-        )}
 
-        {/* Actions */}
-        {canWrite && (
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              marginTop: 12,
-              flexWrap: "wrap",
-              alignItems: "center",
-            }}
-          >
-            {nextStates.map((s) => (
-              <button
-                key={s}
-                onClick={() => doTransition(s)}
-                disabled={transitioning}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 3,
-                  fontSize: 11,
-                  background:
-                    s === "CLOSED"
-                      ? "rgba(92,98,117,0.15)"
-                      : "var(--accent-bg)",
-                  color: s === "CLOSED" ? "#5c6275" : "var(--accent-hover)",
-                  border: `1px solid ${s === "CLOSED" ? "#5c6275" : "var(--accent)"}`,
-                  opacity: transitioning ? 0.5 : 1,
-                }}
-              >
-                → {s}
-              </button>
-            ))}
-            {users.length > 0 && (
-              <select
-                value={item.assignee_id || ""}
-                onChange={(e) => doAssign(e.target.value)}
-                style={{ fontSize: 11, padding: "5px 10px", width: "auto" }}
-              >
-                <option value="">Unassigned</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.username}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-        )}
-        {error && (
-          <div
-            style={{
-              marginTop: 8,
-              fontFamily: "var(--mono)",
-              fontSize: 11,
-              color: "var(--p0)",
-            }}
-          >
-            {error}
+        {/* Transition buttons */}
+        {transitions.length > 0 && (
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {transitions.map(st => {
+              const s = transStyle[st];
+              const blocked = st === 'CLOSED' && !rcaExists;
+              return (
+                <button key={st} onClick={() => doTransition(st)} disabled={!!transitioning || blocked} title={blocked ? 'Submit RCA first' : ''} style={{ height: 36, padding: '0 20px', background: blocked ? 'transparent' : s.bg, color: blocked ? 'var(--text-tertiary)' : s.color, border: `1px solid ${blocked ? 'var(--border-default)' : 'transparent'}`, borderRadius: 20, fontSize: 13, fontWeight: 500, opacity: blocked ? 0.5 : 1 }}>
+                  {transitioning === st ? <span className="spinner" /> : s.label}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Tabs */}
-      <div
-        style={{
-          display: "flex",
-          borderBottom: "1px solid var(--border)",
-          background: "var(--bg-1)",
-        }}
-      >
-        {["overview", "signals", "comments", "rca"].map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            style={{
-              padding: "10px 16px",
-              fontSize: 11,
-              fontFamily: "var(--mono)",
-              letterSpacing: "0.08em",
-              background: "transparent",
-              color: tab === t ? "var(--text-0)" : "var(--text-2)",
-              borderBottom:
-                tab === t ? "2px solid var(--accent)" : "2px solid transparent",
-              borderRadius: 0,
-            }}
-          >
-            {t.toUpperCase()}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        {tab === "overview" && (
-          <div style={{ padding: 16 }}>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 12,
-              }}
-            >
-              {[
-                ["ID", item.id.slice(0, 8) + "..."],
-                ["Component", item.component],
-                ["Assignee", item.assignee_username || "—"],
-                ["Priority", item.priority],
-                ["Start Time", new Date(item.start_time).toLocaleString()],
-                [
-                  "End Time",
-                  item.end_time
-                    ? new Date(item.end_time).toLocaleString()
-                    : "—",
-                ],
-                [
-                  "SLA Deadline",
-                  item.sla_deadline
-                    ? new Date(item.sla_deadline).toLocaleString()
-                    : "—",
-                ],
-                [
-                  "MTTR",
-                  item.mttr_seconds
-                    ? `${Math.round(item.mttr_seconds / 60)}m`
-                    : "—",
-                ],
-              ].map(([k, v]) => (
-                <div
-                  key={k}
-                  style={{
-                    background: "var(--bg-2)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 4,
-                    padding: 12,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontFamily: "var(--mono)",
-                      fontSize: 10,
-                      color: "var(--text-2)",
-                      marginBottom: 4,
-                    }}
-                  >
-                    {k}
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: "var(--mono)",
-                      fontSize: 12,
-                      color: "var(--text-0)",
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {v}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {tab === "signals" && (
-          <div style={{ padding: 12 }}>
-            <div
-              style={{
-                fontFamily: "var(--mono)",
-                fontSize: 10,
-                color: "var(--text-2)",
-                marginBottom: 8,
-              }}
-            >
-              {signals.length} SIGNALS
-            </div>
-            {signals.length === 0 && (
-              <div
-                style={{
-                  color: "var(--text-2)",
-                  fontFamily: "var(--mono)",
-                  fontSize: 12,
-                }}
-              >
-                no signals yet
-              </div>
-            )}
-            {[...signals].reverse().map((s, i) => (
-              <div
-                key={i}
-                style={{
-                  marginBottom: 8,
-                  padding: "10px 12px",
-                  background: "var(--bg-2)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  borderLeft: "3px solid var(--p1)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    marginBottom: 4,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontFamily: "var(--mono)",
-                      fontSize: 10,
-                      color: "var(--p1)",
-                    }}
-                  >
-                    {s.signal_type}
-                  </span>
-                  <span
-                    style={{
-                      fontFamily: "var(--mono)",
-                      fontSize: 10,
-                      color: "var(--text-2)",
-                    }}
-                  >
-                    {s.timestamp
-                      ? new Date(s.timestamp).toLocaleTimeString()
-                      : ""}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text-1)" }}>
-                  {s.message}
-                </div>
+      {/* Signals */}
+      <div style={{ marginBottom: 20 }}>
+        <div onClick={() => setSignalsOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', marginBottom: signalsOpen ? 12 : 0, gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Signals ({signals.length})</span>
+          <span style={{ fontSize: 10, display: 'inline-block', transition: 'transform 0.2s', transform: signalsOpen ? 'rotate(90deg)' : 'none', color: 'var(--text-tertiary)' }}>›</span>
+        </div>
+        {signalsOpen && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, animation: 'slideDown 0.2s' }}>
+            {signals.map((s, i) => (
+              <div key={s.id || i} style={{ background: 'var(--bg-raised)', padding: '6px 12px', borderRadius: 8, fontSize: 11, border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: 'var(--p0-color)' }}>●</span>
+                {/* FIX: signal_type not type */}
+                {s.signal_type} · {formatDistanceToNow(new Date(s.created_at), { addSuffix: true })}
               </div>
             ))}
+            {signals.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>No signals yet.</span>}
           </div>
-        )}
-
-        {tab === "comments" && <CommentsSection wiId={id} />}
-        {tab === "rca" && (
-          <RCAForm
-            workItem={item}
-            onSuccess={() => {
-              load();
-              onRefresh?.();
-            }}
-          />
         )}
       </div>
 
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
+      <div style={{ borderTop: '1px solid var(--border-subtle)', marginBottom: 20 }} />
+      <div style={{ marginBottom: 20 }}>
+        <RCAForm workItem={incident} onSuccess={() => { setRcaExists(true); load(); onRefresh?.(); }} />
+      </div>
+      <div style={{ borderTop: '1px solid var(--border-subtle)', marginBottom: 20 }} />
+      {/* FIX: pass id (number/string), not incident.id via wiId */}
+      <CommentsSection wiId={id} />
     </div>
   );
 }

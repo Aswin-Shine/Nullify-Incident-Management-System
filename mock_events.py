@@ -11,6 +11,12 @@ import random
 
 BASE = "http://localhost:8000"
 
+# ── Auth credentials ──────────────────────────────────────────────────────────
+# Change these to match an existing admin/sre account in your DB
+MOCK_USERNAME = "Aswin"
+MOCK_PASSWORD = "Aswin0407"
+# ─────────────────────────────────────────────────────────────────────────────
+
 SCENARIOS = [
     # Wave 1: RDBMS primary failure (P0)
     {
@@ -75,11 +81,25 @@ SCENARIOS = [
 ]
 
 
+async def get_token(client: httpx.AsyncClient) -> str:
+    """Login and return JWT token."""
+    r = await client.post(
+        f"{BASE}/api/auth/login",
+        json={"username": MOCK_USERNAME, "password": MOCK_PASSWORD},
+        timeout=5,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Login failed ({r.status_code}): {r.text}")
+    token = r.json().get("access_token")
+    print(f"✓ Authenticated as '{MOCK_USERNAME}'")
+    return token
+
+
 async def send_signal(client: httpx.AsyncClient, signal: dict, delay: float = 0):
     if delay:
         await asyncio.sleep(delay)
     try:
-        r = await client.post(f"{BASE}/api/signals", json=signal, timeout=5)
+        r = await client.post(f"{BASE}/api/signals", json=signal, timeout=5, headers=client.headers)
         status = "✓" if r.status_code == 202 else f"✗ {r.status_code}"
         print(f"  {status} [{signal['component_id']}] {signal['signal_type']}")
     except Exception as e:
@@ -108,7 +128,11 @@ async def main():
     print("Simulating: RDBMS outage → MCP cascade")
     print("=" * 60)
 
-    async with httpx.AsyncClient() as client:
+    # Get JWT token first
+    async with httpx.AsyncClient() as auth_client:
+        token = await get_token(auth_client)
+
+    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
         # Health check
         try:
             r = await client.get(f"{BASE}/health", timeout=3)
