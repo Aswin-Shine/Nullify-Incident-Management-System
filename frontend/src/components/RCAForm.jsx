@@ -2,12 +2,13 @@ import React, { useState, useEffect } from "react";
 import { fetchRCA, submitRCA } from "../api/client";
 
 const CATEGORIES = [
-  "Software Bug",
   "Infrastructure Failure",
-  "Human Error",
-  "External Provider",
-  "Capacity Exhaustion",
+  "Code Defect",
   "Configuration Error",
+  "Dependency Outage",
+  "Capacity Exhaustion",
+  "Security Incident",
+  "Human Error",
   "Unknown",
 ];
 
@@ -79,17 +80,45 @@ export function RCAForm({ workItem, onSuccess }) {
       .catch(() => {});
   }, [workItem.id]);
 
+  // const handleSubmit = async () => {
+  //   setSubmitting(true);
+  //   setError("");
+  //   try {
+  //     // FIX: submitRCA → POST /api/work-items/:id/rca
+  //     await submitRCA(workItem.id, formData);
+  //     const r = await fetchRCA(workItem.id);
+  //     if (r) setExisting(r);
+  //     onSuccess?.();
+  //   } catch (e) {
+  //     setError(e.response?.data?.detail || "Submission failed");
+  //   } finally {
+  //     setSubmitting(false);
+  //   }
+  // };
+
   const handleSubmit = async () => {
     setSubmitting(true);
     setError("");
     try {
-      // FIX: submitRCA → POST /api/work-items/:id/rca
       await submitRCA(workItem.id, formData);
       const r = await fetchRCA(workItem.id);
       if (r) setExisting(r);
       onSuccess?.();
     } catch (e) {
-      setError(e.response?.data?.detail || "Submission failed");
+      console.error("Submission failed:", e);
+
+      // Safely extract a string from the error response
+      const detail = e.response?.data?.detail;
+      let errorMsg = "Submission failed";
+
+      if (typeof detail === "string") {
+        errorMsg = detail;
+      } else if (Array.isArray(detail)) {
+        // Extract the human-readable message from the first validation error
+        errorMsg = detail[0]?.msg || "Invalid input data";
+      }
+
+      setError(errorMsg); // Now it's a string, React won't crash
     } finally {
       setSubmitting(false);
     }

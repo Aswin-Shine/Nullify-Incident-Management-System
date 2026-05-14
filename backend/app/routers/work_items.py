@@ -103,7 +103,21 @@ async def assign(
     return updated.model_dump(mode="json")
 
 
-@router.post("/{wi_id}/rca")
+#@router.post("/{wi_id}/rca")
+# async def submit_rca(
+#     wi_id: str,
+#     body: RCASubmit,
+#     user: User = Depends(require_sre_or_admin),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     try:
+#         rca = await work_item_service.submit_rca(wi_id, body, db, user.id)
+#     except ValueError as e:
+#         raise HTTPException(422, str(e))
+#     await manager.broadcast({"event": "rca_submitted", "id": wi_id})
+#     return rca.model_dump(mode="json")
+
+@router.post("/{wi_id}/rca", response_model=None) # Added response_model=None
 async def submit_rca(
     wi_id: str,
     body: RCASubmit,
@@ -112,10 +126,10 @@ async def submit_rca(
 ):
     try:
         rca = await work_item_service.submit_rca(wi_id, body, db, user.id)
+        # Ensure we return a dictionary or a Pydantic-compatible object
+        return rca.model_dump(mode="json") 
     except ValueError as e:
         raise HTTPException(422, str(e))
-    await manager.broadcast({"event": "rca_submitted", "id": wi_id})
-    return rca.model_dump(mode="json")
 
 
 @router.get("/{wi_id}/rca")
