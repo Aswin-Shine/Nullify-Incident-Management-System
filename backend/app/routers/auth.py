@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token, generate_api_key
 from app.core.deps import get_current_active_user, require_admin
+from app.core.rate_limit import auth_limit
 from app.db.postgres import get_db, User
 from app.models.schemas import UserCreate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
 
@@ -22,7 +23,7 @@ def _user_resp(u: User) -> UserResponse:
     )
 
 
-@router.post("/register", response_model=UserResponse, status_code=201)
+@router.post("/register", response_model=UserResponse, status_code=201, dependencies=[Depends(auth_limit)])
 async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     existing = await db.execute(select(User).where(User.username == data.username))
     if existing.scalar_one_or_none():
@@ -41,7 +42,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     return _user_resp(user)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(auth_limit)])
 async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.username == data.username))
     user = result.scalar_one_or_none()

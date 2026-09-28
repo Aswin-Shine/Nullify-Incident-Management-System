@@ -14,6 +14,7 @@ os.environ["DB_NAME"] = os.environ.get("TEST_DB_NAME", "ims_test")
 os.environ["REDIS_DB"] = "15"
 os.environ["LAKE_DIR"] = tempfile.mkdtemp(prefix="nullify-lake-")
 os.environ["OTLP_ENDPOINT"] = ""
+os.environ["DB_RETRY_BASE_DELAY"] = "0.001"
 
 import asyncpg
 import pytest
@@ -76,6 +77,10 @@ async def clean_state(test_database):
         await conn.execute(text(TRUNCATE_ALL))
     await cache.init_redis()
     await cache._r().flushdb()
+    from app.services.ingestion import _queue
+    while not _queue.empty():  # API tests enqueue without running workers; start every test empty
+        _queue.get_nowait()
+        _queue.task_done()
     yield
     await cache.close_redis()
 

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.config import get_settings
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg, WorkItem
@@ -163,6 +164,52 @@ async def test_new_incident_visible_in_cached_list_immediately(client, make_head
 
     r = await client.get("/api/work-items", headers=headers)
     assert [w["id"] for w in r.json()] == [wi_id]
+
+
+def _upsert_failing(times, exc):
+    """Wrap the real upsert so the first `times` calls fail with `exc`."""
+    from app.services.work_item_service import upsert_active_work_item as real
+    calls = []
+
+    async def upsert(*args, **kwargs):
+        calls.append(1)
+        if len(calls) <= times:
+            raise exc
+        return await real(*args, **kwargs)
+    return upsert, calls
+
+
+async def test_transient_db_error_is_retried_without_double_counting():
+    """Regression for B-11: a Postgres blip used to drop the signal's incident and timeseries."""
+    upsert, calls = _upsert_failing(2, OperationalError("stmt", {}, Exception("connection reset")))
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=upsert):
+        wi_id = await process_signal(sig("CACHE_RETRY"))
+
+    assert len(calls) == 3
+    [wi] = await all_work_items()
+    assert (wi.id, wi.signal_count) == (wi_id, 1)  # failed attempts rolled back fully
+    async with AsyncSessionLocal() as db:
+        assert (await db.execute(select(func.count()).select_from(Signal))).scalar_one() == 1
+    [line] = lake_lines("CACHE_RETRY")
+    assert line["work_item_id"] == wi_id
+
+
+async def test_retries_give_up_and_audit_log_keeps_signal():
+    upsert, calls = _upsert_failing(99, OperationalError("stmt", {}, Exception("db down")))
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=upsert):
+        assert await process_signal(sig("CACHE_RETRY_DOWN")) is None
+
+    assert len(calls) == get_settings().db_retry_attempts
+    [line] = lake_lines("CACHE_RETRY_DOWN")
+    assert line["work_item_id"] is None
+
+
+async def test_integrity_error_is_not_retried():
+    upsert, calls = _upsert_failing(99, IntegrityError("stmt", {}, Exception("duplicate")))
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=upsert):
+        assert await process_signal(sig("CACHE_INTEGRITY")) is None
+
+    assert len(calls) == 1
 
 
 async def test_db_failure_still_writes_audit_log_and_does_not_raise():

@@ -1,0 +1,74 @@
+"""Graceful shutdown: drain the queue, never silently lose an accepted (202) signal."""
+import asyncio
+import json
+import os
+
+import pytest
+from sqlalchemy import func, select
+from unittest.mock import patch
+
+from app.core.config import get_settings
+from app.db.postgres import AsyncSessionLocal, Signal
+from app.services import ingestion
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
+
+
+def sig(component="CACHE_SHUTDOWN"):
+    return {"component_id": component, "signal_type": "ERROR", "message": "boom",
+            "severity": "HIGH", "metadata": {}, "timestamp": None}
+
+
+def lake_lines(component):
+    with open(os.path.join(get_settings().lake_dir, f"{component}.jsonl")) as f:
+        return [json.loads(line) for line in f.read().splitlines()]
+
+
+@pytest.fixture(autouse=True)
+async def isolated_pipeline(monkeypatch):
+    # Other tests post signals without running the lifespan, so "accepting" must be restored.
+    monkeypatch.setattr(ingestion, "_accepting", True)
+    yield
+    await ingestion.stop_ingestion_workers(timeout=0)
+
+
+async def test_graceful_stop_drains_every_queued_signal():
+    await ingestion.start_ingestion_workers(2)
+    for _ in range(30):
+        assert await ingestion.enqueue_signal(sig())
+
+    spilled = await ingestion.stop_ingestion_workers(timeout=10)
+
+    assert spilled == 0
+    async with AsyncSessionLocal() as db:
+        assert (await db.execute(select(func.count()).select_from(Signal))).scalar_one() == 30
+    assert not ingestion.accepting()
+
+
+async def test_drain_timeout_spills_in_flight_and_queued_signals_to_lake():
+    """Regression for B-08: shutdown used to drop whatever was still queued, audit log included."""
+    async def hang(signal):
+        await asyncio.sleep(60)
+
+    with patch("app.services.ingestion.process_signal", side_effect=hang):
+        await ingestion.start_ingestion_workers(1)
+        for _ in range(3):
+            await ingestion.enqueue_signal(sig("CACHE_SPILL"))
+        await asyncio.sleep(0.05)  # the worker picks up the first one and hangs on it
+
+        spilled = await ingestion.stop_ingestion_workers(timeout=0.2)
+
+    assert spilled == 3
+    lines = lake_lines("CACHE_SPILL")
+    assert len(lines) == 3
+    assert all(line["work_item_id"] is None for line in lines)
+
+
+async def test_ingest_returns_503_while_shutting_down(client, make_headers):
+    headers = await make_headers("sre")
+    await ingestion.start_ingestion_workers(1)
+    await ingestion.stop_ingestion_workers(timeout=1)
+
+    r = await client.post("/api/signals", json=sig(), headers=headers)
+
+    assert r.status_code == 503

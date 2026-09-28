@@ -54,13 +54,18 @@ class Settings(BaseSettings):
     otlp_endpoint: str = ""          # e.g. http://localhost:4317
     log_level: str = "INFO"
 
-    # Rate limiting
-    rate_limit_ingestion: str = "5000/minute"
-    rate_limit_api: str = "1000/minute"
+    # Rate limiting (fixed windows in Redis, shared by every worker/replica)
+    rate_limit_ingest_per_sec: int = 2000   # requests per principal; a batch counts as one request
+    rate_limit_auth_per_min: int = 10       # login/register attempts per client IP
 
     # Ingestion
     queue_max_size: int = 50_000
     ingestion_workers: int = 4
+    shutdown_drain_seconds: float = 20.0    # keep below docker-compose stop_grace_period
+
+    # DB write retry (transient errors only)
+    db_retry_attempts: int = 3
+    db_retry_base_delay: float = 0.2
 
 
 @lru_cache

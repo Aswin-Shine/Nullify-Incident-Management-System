@@ -3,14 +3,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
-
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.cache import init_redis, close_redis
-from app.services.ingestion import start_ingestion_workers
+from app.services.ingestion import start_ingestion_workers, stop_ingestion_workers
 from app.middleware.observability import setup_prometheus, setup_otel
 from app.routers import signals, work_items, health, ws, auth
 
@@ -19,7 +15,6 @@ setup_logging()
 import logging
 logger = logging.getLogger("ims.main")
 settings = get_settings()
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit_api])
 
 
 @asynccontextmanager
@@ -29,7 +24,8 @@ async def lifespan(app: FastAPI):
     await start_ingestion_workers()
     logger.info("Nullify ready")
     yield
-    logger.info("Shutting down Nullify")
+    logger.info("Shutting down Nullify: draining ingestion queue")
+    await stop_ingestion_workers(settings.shutdown_drain_seconds)
     await close_redis()
 
 
@@ -43,10 +39,6 @@ app = FastAPI(
 # Observability
 setup_prometheus(app)
 setup_otel(app)
-
-# Rate limiting
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
 app.add_middleware(
