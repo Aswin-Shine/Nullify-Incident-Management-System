@@ -38,6 +38,7 @@ env/
 
 # ── Data lake (runtime JSONL files) ──────────────────────────────────────
 backend/datalake/*.jsonl
+backend/data_lake/
 
 # ── Logs ──────────────────────────────────────────────────────────────────
 logs/
@@ -79,3 +80,9 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+
+# Claude Files
+docs/
+CLAUDE.md 
+tasks/
