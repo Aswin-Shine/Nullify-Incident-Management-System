@@ -62,13 +62,13 @@ ok "SSH directory ready — add your public key to ${DEPLOY_HOME}/.ssh/authorize
 # ── 4. Create app directory ──────────────────────────────────
 info "Creating /opt/nullify..."
 mkdir -p /opt/nullify
-chown "${DEPLOY_USER}:${DEPLOY_USER}" /opt/nullify
+chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /opt/nullify
 
 # ── 5. Copy docker-compose.yml + .env to EC2 ────────────────
 # You must manually scp these files:
 #   scp docker-compose.yml deploy@<EC2_IP>:/opt/nullify/
-#   scp .env               deploy@<EC2_IP>:/opt/nullify/
-ok "/opt/nullify ready — remember to scp docker-compose.yml and .env"
+#   scp .env               deploy@<EC2_IP>:/opt/nullify/.env   (production values)
+ok "/opt/nullify ready: scp docker-compose.yml and .env, then run docker compose up -d"
 
 # ── 6. UFW firewall ──────────────────────────────────────────
 info "Configuring firewall..."
@@ -83,7 +83,7 @@ echo "  EC2 bootstrap complete."
 echo ""
 echo "  Next steps:"
 echo "  1. scp docker-compose.yml deploy@<EC2_IP>:/opt/nullify/"
-echo "  2. scp .env               deploy@<EC2_IP>:/opt/nullify/"
+echo "  2. scp .env               deploy@<EC2_IP>:/opt/nullify/.env"
 echo "  3. Add SSH public key to /home/deploy/.ssh/authorized_keys"
 echo "  4. Add GitHub Secrets (see README below)"
 echo "======================================================"

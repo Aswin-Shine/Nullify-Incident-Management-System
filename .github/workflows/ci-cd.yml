@@ -338,7 +338,7 @@
 #           chmod 600 ~/.ssh/nullify_deploy
 #           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-#       # Deploy — SSH into EC2 and run docker compose pull + up
+#       # Deploy: SSH into EC2 and run docker compose pull + up
 #       - name: Deploy to EC2
 #         env:
 #           EC2_HOST:    ${{ secrets.EC2_HOST }}

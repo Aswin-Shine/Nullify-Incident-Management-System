@@ -43,7 +43,7 @@ ssh ubuntu@<EC2_IP> "sudo bash ~/ec2-bootstrap-cicd.sh"
 
 ```bash
 scp docker-compose.yml deploy@<EC2_IP>:/opt/nullify/
-scp .env               deploy@<EC2_IP>:/opt/nullify/
+scp .env               deploy@<EC2_IP>:/opt/nullify/.env   # the single env file, production values
 ```
 
 ## Step 5 — Add GitHub Secrets
