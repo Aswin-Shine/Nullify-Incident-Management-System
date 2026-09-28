@@ -1,29 +1,27 @@
-"""Signal ingestion pipeline — asyncio.Queue backpressure + Postgres + debounce."""
+"""Signal ingestion pipeline: asyncio.Queue backpressure -> workers -> Postgres + data lake.
+
+Debounce is enforced by Postgres (partial unique index on active Work Items per component), so it
+stays correct across any number of worker tasks, processes or replicas.
+"""
 from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
-from collections import defaultdict
 from datetime import datetime, timezone
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.core.config import get_settings
-from app.db import cache
 from app.db.nosql import append_signal
-from app.db.postgres import AsyncSessionLocal, WorkItem, TimeseriesAgg
-from app.models.schemas import WorkItemCreate
-from app.services.alert_strategy import get_alert_strategy
+from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg
 from app.services import webhooks
+from app.services.work_item_service import invalidate_cache, upsert_active_work_item
 
 logger = logging.getLogger("ims.ingestion")
 settings = get_settings()
 
+# ponytail: in-process queue loses accepted signals on crash (B-08); Redis Streams in Phase 1
 _queue: asyncio.Queue = asyncio.Queue(maxsize=settings.queue_max_size)
-
-_debounce_counts: dict[str, int] = defaultdict(int)
-_debounce_window_start: dict[str, float] = {}
-_debounce_work_item: dict[str, str] = {}
-_debounce_lock = asyncio.Lock()
 
 _processed_count = 0
 _last_metric_time = time.monotonic()
@@ -34,97 +32,84 @@ async def enqueue_signal(signal: dict) -> bool:
         _queue.put_nowait(signal)
         return True
     except asyncio.QueueFull:
-        logger.warning("Queue full — signal dropped for %s", signal.get("component_id"))
+        logger.warning("Queue full, signal rejected for %s", signal.get("component_id"))
         return False
 
 
-async def _get_or_create_work_item(component_id: str, signal: dict) -> str | None:
-    async with _debounce_lock:
-        now = time.monotonic()
-        window_start = _debounce_window_start.get(component_id, now)
+def _occurred_at(raw, received: datetime) -> datetime:
+    """Producer event time as aware UTC, clamped so producer clock skew can't land in the future."""
+    if isinstance(raw, str):
+        try:
+            raw = datetime.fromisoformat(raw)
+        except ValueError:
+            raw = None
+    if raw is None:
+        return received
+    if raw.tzinfo is None:
+        raw = raw.replace(tzinfo=timezone.utc)
+    return min(raw, received)
 
-        if now - window_start > settings.debounce_window_seconds:
-            _debounce_counts[component_id] = 0
-            _debounce_window_start[component_id] = now
-            _debounce_work_item.pop(component_id, None)
 
-        _debounce_counts[component_id] += 1
+async def _persist(component: str, record: dict, occurred: datetime, received: datetime):
+    """One transaction: attach to the active Work Item, store the linked signal, bump the timeseries."""
+    async with AsyncSessionLocal() as db:
+        wi = await upsert_active_work_item(
+            db, component, occurred, record.get("signal_type") or "FAILURE", record.get("message") or ""
+        )
+        db.add(Signal(
+            work_item_id=wi.id, component=component, signal_type=record.get("signal_type") or "FAILURE",
+            severity=record.get("severity"), message=record.get("message") or "", payload=record,
+            occurred_at=occurred, received_at=received,
+        ))
+        ts = pg_insert(TimeseriesAgg).values(
+            bucket=occurred.strftime("%Y-%m-%dT%H:%M"), component=component, signal_count=1
+        )
+        await db.execute(ts.on_conflict_do_update(
+            constraint="uq_ts_bucket_component", set_={"signal_count": TimeseriesAgg.signal_count + 1}
+        ))
+        await db.commit()
+        return wi
 
-        if component_id in _debounce_work_item:
-            return _debounce_work_item[component_id]
 
-        count = _debounce_counts[component_id]
-        if count == 1 or count >= settings.debounce_threshold:
-            strategy = get_alert_strategy(component_id)
-            wi_data = WorkItemCreate(
-                component=component_id,
-                priority=strategy.priority(),
-                title=f"{component_id} — {signal.get('signal_type', 'FAILURE')}",
-                description=strategy.notify(component_id, signal.get("message", "")),
-            )
-            async with AsyncSessionLocal() as db:
-                wi_id = str(uuid.uuid4())
-                from datetime import timedelta
-                from app.services.work_item_service import SLA_MINUTES
-                ts = datetime.now(timezone.utc)
-                sla = ts + timedelta(minutes=SLA_MINUTES.get(wi_data.priority, 1440))
-                wi = WorkItem(
-                    id=wi_id, component=wi_data.component, priority=wi_data.priority,
-                    status="OPEN", title=wi_data.title, description=wi_data.description,
-                    start_time=ts, sla_deadline=sla, created_at=ts, updated_at=ts,
-                )
-                db.add(wi)
-                await db.commit()
+async def process_signal(signal: dict) -> str | None:
+    """Persist one signal and append it to the lake audit log. Returns its Work Item id.
 
-            # Fire webhook async (don't block worker)
-            asyncio.create_task(webhooks.notify_incident_created(
-                {"id": wi_id, "component": component_id, "priority": wi_data.priority,
-                 "title": wi_data.title, "description": wi_data.description}
-            ))
+    Never raises for DB failures: the raw signal still reaches the lake with work_item_id=None.
+    """
+    received = datetime.now(timezone.utc)
+    occurred = _occurred_at(signal.get("timestamp"), received)
+    component = signal.get("component_id") or "UNKNOWN"
+    record = {**signal, "timestamp": occurred.isoformat(), "received_at": received.isoformat()}
 
-            _debounce_work_item[component_id] = wi_id
-            logger.info("Work item %s created for %s (count=%d)", wi_id, component_id, count)
-            return wi_id
-        return None
+    try:
+        wi = await _persist(component, record, occurred, received)
+    except Exception:
+        logger.exception("Signal persistence failed for %s", component)
+        wi = None
+
+    if wi is not None and wi.created:
+        # Side effects only after commit: the dashboard must see the new incident, and page once.
+        await invalidate_cache()
+        asyncio.create_task(webhooks.notify_incident_created({
+            "id": wi.id, "component": wi.component, "priority": wi.priority,
+            "title": wi.title, "description": wi.description,
+        }))
+        logger.info("Work item %s opened for %s", wi.id, component)
+
+    wi_id = wi.id if wi is not None else None
+    await append_signal({**record, "work_item_id": wi_id})
+    return wi_id
 
 
 async def _worker():
     global _processed_count
     while True:
+        signal = await _queue.get()
         try:
-            signal: dict = await asyncio.wait_for(_queue.get(), timeout=1.0)
-        except asyncio.TimeoutError:
-            continue
-        except Exception:
-            continue
-
-        try:
-            await append_signal(signal)
-            cid = signal.get("component_id", "UNKNOWN")
-            await _get_or_create_work_item(cid, signal)
-
-            bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
-            async with AsyncSessionLocal() as db:
-                from sqlalchemy.dialects.postgresql import insert as pg_insert
-                stmt = pg_insert(TimeseriesAgg).values(
-                    bucket=bucket, component=cid, signal_count=1
-                ).on_conflict_do_update(
-                    index_elements=["bucket", "component"],
-                    set_={"signal_count": TimeseriesAgg.signal_count + 1}
-                )
-                # fallback: use raw upsert via execute
-                await db.execute(
-                    __import__("sqlalchemy").text(
-                        "INSERT INTO timeseries_agg (bucket, component, signal_count) VALUES (:b, :c, 1) "
-                        "ON CONFLICT DO NOTHING"
-                    ),
-                    {"b": bucket, "c": cid}
-                )
-                await db.commit()
-
+            await process_signal(signal)
             _processed_count += 1
-        except Exception as exc:
-            logger.error("Worker error: %s", exc, exc_info=True)
+        except Exception:
+            logger.exception("Worker failed on signal for %s", signal.get("component_id"))
         finally:
             _queue.task_done()
 
@@ -136,7 +121,7 @@ async def _metrics_printer():
         now = time.monotonic()
         elapsed = now - _last_metric_time
         rate = _processed_count / elapsed if elapsed > 0 else 0
-        logger.info("📊 THROUGHPUT: %.1f sig/sec | q=%d/%d | total=%d",
+        logger.info("THROUGHPUT: %.1f sig/sec | q=%d/%d | total=%d",
                     rate, _queue.qsize(), _queue.maxsize, _processed_count)
         _processed_count = 0
         _last_metric_time = now

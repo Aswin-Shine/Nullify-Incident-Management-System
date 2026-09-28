@@ -1,8 +1,8 @@
 """Pydantic schemas for Nullify."""
 from __future__ import annotations
-from pydantic import BaseModel, field_validator, EmailStr
+from pydantic import BaseModel, field_validator, model_validator, EmailStr
 from typing import Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 
 Priority = Literal["P0", "P1", "P2", "P3"]
 Status = Literal["OPEN", "INVESTIGATING", "RESOLVED", "CLOSED"]
@@ -52,7 +52,7 @@ class SignalPayload(BaseModel):
     message: str
     severity: Optional[str] = "MEDIUM"
     metadata: Optional[dict] = {}
-    timestamp: Optional[str] = None
+    timestamp: Optional[datetime] = None  # producer event time; ingestion clamps future values
 
     @field_validator("component_id")
     @classmethod
@@ -83,6 +83,8 @@ class WorkItemResponse(BaseModel):
     mttr_seconds: Optional[int]
     sla_deadline: Optional[datetime]
     sla_breached: bool = False
+    signal_count: int = 0
+    last_signal_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -95,11 +97,23 @@ class AssignRequest(BaseModel):
 # ── RCA ───────────────────────────────────────────────────────────────────
 
 class RCASubmit(BaseModel):
-    incident_start: str
-    incident_end: str
+    incident_start: datetime
+    incident_end: datetime
     root_cause_category: str
     fix_applied: str
     prevention_steps: str
+
+    @field_validator("incident_start", "incident_end")
+    @classmethod
+    def assume_utc(cls, v: datetime) -> datetime:
+        # The UI's datetime-local input has no offset (F-06); treat naive values as UTC.
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+
+    @model_validator(mode="after")
+    def end_not_before_start(self) -> "RCASubmit":
+        if self.incident_end < self.incident_start:
+            raise ValueError("incident_end must not be before incident_start")
+        return self
 
     @field_validator("root_cause_category")
     @classmethod

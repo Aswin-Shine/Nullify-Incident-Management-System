@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     jwt_refresh_token_expire_days: int = 7
 
     # Data lake (JSONL files)
-    lake_dir: str = "datalake"
+    lake_dir: str = "data_lake"  # matches the /app/data_lake volume in docker-compose
 
     # Webhooks
     slack_webhook_url: str = ""
@@ -61,8 +61,6 @@ class Settings(BaseSettings):
     # Ingestion
     queue_max_size: int = 50_000
     ingestion_workers: int = 4
-    debounce_window_seconds: float = 10.0
-    debounce_threshold: int = 100
 
 
 @lru_cache

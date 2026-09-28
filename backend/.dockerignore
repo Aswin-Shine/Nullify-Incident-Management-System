@@ -14,6 +14,7 @@ venv/
 tests/
 locustfile.py
 data_lake/
+datalake/
 *.log
 .git/
 .gitignore

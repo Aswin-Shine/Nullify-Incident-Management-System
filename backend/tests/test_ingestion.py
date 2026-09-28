@@ -1,0 +1,173 @@
+"""Ingestion: debounce into one active incident, linked signals, timeseries, lake audit.
+
+Debounce rule: every signal for a component joins that component's single OPEN/INVESTIGATING
+Work Item; once it is RESOLVED the next signal opens a new one. No signal is dropped.
+"""
+import asyncio
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy import func, select, update
+
+from app.core.config import get_settings
+from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg, WorkItem
+from app.services.ingestion import process_signal
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
+
+
+def sig(component="CACHE_CLUSTER_01", ts=None, **extra):
+    return {"component_id": component, "signal_type": "ERROR", "message": "boom",
+            "severity": "HIGH", "metadata": {}, "timestamp": ts, **extra}
+
+
+async def all_work_items():
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(WorkItem).order_by(WorkItem.created_at))).scalars().all()
+
+
+async def set_status(wi_id, status):
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(WorkItem).where(WorkItem.id == wi_id).values(status=status))
+        await db.commit()
+
+
+def lake_lines(component):
+    with open(os.path.join(get_settings().lake_dir, f"{component}.jsonl")) as f:
+        return [json.loads(line) for line in f.read().splitlines()]
+
+
+@pytest.mark.parametrize("component,priority", [("RDBMS_PRIMARY", "P0"), ("CACHE_CLUSTER_01", "P2")])
+async def test_first_signal_opens_work_item_with_strategy_priority(component, priority):
+    wi_id = await process_signal(sig(component))
+
+    [wi] = await all_work_items()
+    assert (wi.id, wi.component, wi.status, wi.priority, wi.signal_count) == \
+           (wi_id, component, "OPEN", priority, 1)
+
+
+async def test_100_signals_same_component_make_one_work_item():
+    ids = {await process_signal(sig()) for _ in range(100)}
+
+    [wi] = await all_work_items()
+    assert ids == {wi.id}
+    assert wi.signal_count == 100
+
+
+async def test_100_concurrent_signals_make_exactly_one_work_item():
+    # Each call uses its own session/connection, like separate workers or processes.
+    ids = await asyncio.gather(*(process_signal(sig()) for _ in range(100)))
+
+    [wi] = await all_work_items()
+    assert set(ids) == {wi.id}
+    assert wi.signal_count == 100
+
+
+async def test_signal_after_resolve_opens_new_work_item():
+    """Regression for B-00: the old in-memory window never expired."""
+    first = await process_signal(sig())
+    await process_signal(sig())
+    await set_status(first, "RESOLVED")
+
+    second = await process_signal(sig())
+
+    assert second != first
+    old, new = await all_work_items()
+    assert (old.id, old.status, old.signal_count) == (first, "RESOLVED", 2)
+    assert (new.id, new.status, new.signal_count) == (second, "OPEN", 1)
+
+
+async def test_every_signal_is_stored_and_linked():
+    ids = {await process_signal(sig()) for _ in range(20)}
+
+    async with AsyncSessionLocal() as db:
+        linked = (await db.execute(select(Signal.work_item_id))).scalars().all()
+    assert len(ids) == 1
+    assert linked == [ids.pop()] * 20
+
+
+async def test_signals_endpoint_returns_only_that_incidents_signals(client, make_headers):
+    """Regression for B-12: the endpoint used to return the component's whole history."""
+    headers = await make_headers("viewer")
+    old = None
+    for _ in range(3):
+        old = await process_signal(sig(message="old outage"))
+    await set_status(old, "RESOLVED")
+    new = await process_signal(sig(message="new outage"))
+
+    r = await client.get(f"/api/work-items/{old}/signals", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 3
+    assert {s["message"] for s in body} == {"old outage"}
+    assert {s["work_item_id"] for s in body} == {old}
+
+    r = await client.get(f"/api/work-items/{new}/signals", headers=headers)
+    assert [s["message"] for s in r.json()] == ["new outage"]
+
+
+async def test_start_time_is_earliest_signal_and_future_timestamps_are_clamped():
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await process_signal(sig(ts=t0 + timedelta(minutes=5)))
+    await process_signal(sig(ts=t0.isoformat()))  # happened first, arrived late, as an ISO string
+    await process_signal(sig(ts=datetime.now(timezone.utc) + timedelta(days=1)))  # producer clock skew
+
+    [wi] = await all_work_items()
+    assert wi.start_time == t0
+    assert wi.last_signal_at <= datetime.now(timezone.utc)
+
+
+async def test_timeseries_counts_accumulate_per_bucket_and_component():
+    """Regression for B-04: counts were stuck at 1 (one row per signal)."""
+    ts = datetime.now(timezone.utc).replace(second=30, microsecond=0) - timedelta(minutes=1)
+    for _ in range(5):
+        await process_signal(sig("CACHE_A", ts=ts))
+    for _ in range(2):
+        await process_signal(sig("QUEUE_B", ts=ts))
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(TimeseriesAgg.component, func.count(), func.sum(TimeseriesAgg.signal_count))
+            .group_by(TimeseriesAgg.component)
+        )).all()
+    assert sorted(tuple(r) for r in rows) == [("CACHE_A", 1, 5), ("QUEUE_B", 1, 2)]
+
+
+async def test_alert_fires_once_per_new_incident_not_per_signal(mock_webhooks):
+    for _ in range(10):
+        await process_signal(sig("RDBMS_PRIMARY"))
+    await asyncio.sleep(0)  # the webhook runs as a background task
+
+    assert mock_webhooks["created"].call_count == 1
+
+
+async def test_raw_signal_goes_to_lake_under_settings_dir_with_work_item_id():
+    """Regression for B-02: the lake ignored settings.lake_dir."""
+    wi_id = await process_signal(sig("CACHE_LAKE"))
+
+    [line] = lake_lines("CACHE_LAKE")
+    assert line["work_item_id"] == wi_id
+    assert line["message"] == "boom"
+
+
+async def test_new_incident_visible_in_cached_list_immediately(client, make_headers):
+    """Regression for B-09: ingestion-created incidents never invalidated the list cache."""
+    headers = await make_headers("viewer")
+    r = await client.get("/api/work-items", headers=headers)
+    assert r.json() == []  # primes the Redis list cache
+
+    wi_id = await process_signal(sig())
+
+    r = await client.get("/api/work-items", headers=headers)
+    assert [w["id"] for w in r.json()] == [wi_id]
+
+
+async def test_db_failure_still_writes_audit_log_and_does_not_raise():
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=RuntimeError("db down")):
+        assert await process_signal(sig("CACHE_DB_DOWN")) is None
+
+    [line] = lake_lines("CACHE_DB_DOWN")
+    assert line["work_item_id"] is None

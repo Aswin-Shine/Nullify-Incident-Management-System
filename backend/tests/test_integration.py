@@ -5,7 +5,7 @@ from httpx import AsyncClient
 from unittest.mock import patch, AsyncMock
 
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
 
 
 @pytest.fixture

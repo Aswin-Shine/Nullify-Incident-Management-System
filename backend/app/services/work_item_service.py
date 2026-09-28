@@ -5,19 +5,26 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
+from sqlalchemy import exists, select, func, update, literal_column, text
+from sqlalchemy.engine import Row
 from sqlalchemy.orm import selectinload
 
-from app.db.postgres import WorkItem, RCARecord, Comment, User
+from app.db.postgres import ACTIVE_WHERE, WorkItem, RCARecord, Comment, Signal, User
 from app.db import cache
 from app.models.schemas import (
     WorkItemCreate, WorkItemResponse, RCASubmit, RCAResponse,
     CommentCreate, CommentResponse, MTTRStats, SLAStats
 )
+from app.services.alert_strategy import get_alert_strategy
 from app.services.state_machine import validate_transition, InvalidTransitionError
 
 logger = logging.getLogger("ims.work_item")
+
+class ConflictError(Exception):
+    """The Work Item changed underneath this request (maps to HTTP 409)."""
+
 
 # SLA deadlines by priority (minutes to acknowledge)
 SLA_MINUTES = {"P0": 15, "P1": 60, "P2": 240, "P3": 1440}
@@ -44,6 +51,8 @@ def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
         mttr_seconds=wi.mttr_seconds,
         sla_deadline=wi.sla_deadline,
         sla_breached=sla_breached,
+        signal_count=wi.signal_count,
+        last_signal_at=wi.last_signal_at,
         created_at=wi.created_at,
         updated_at=wi.updated_at,
     )
@@ -68,8 +77,51 @@ async def create_work_item(data: WorkItemCreate, db: AsyncSession) -> str:
     )
     db.add(wi)
     await db.flush()
-    await _invalidate_cache()
+    await invalidate_cache()
     return wi_id
+
+
+async def upsert_active_work_item(
+    db: AsyncSession, component: str, occurred_at: datetime, signal_type: str, message: str
+) -> Row:
+    """Attach a signal to the component's active (OPEN/INVESTIGATING) Work Item, creating one if needed.
+
+    A single INSERT ... ON CONFLICT against the partial unique index `ux_wi_active_component`, so
+    concurrent callers in any process agree on one incident. Returns the row with a `created` flag.
+    """
+    strategy = get_alert_strategy(component)
+    priority = strategy.priority()
+    now = _now()
+    ins = pg_insert(WorkItem).values(
+        id=str(uuid.uuid4()), component=component, priority=priority, status="OPEN",
+        title=f"{component} - {signal_type}", description=strategy.notify(component, message),
+        start_time=occurred_at, last_signal_at=occurred_at, signal_count=1,
+        sla_deadline=occurred_at + timedelta(minutes=SLA_MINUTES[priority]),
+        created_at=now, updated_at=now,
+    )
+    stmt = ins.on_conflict_do_update(
+        index_elements=[WorkItem.component],
+        index_where=text(ACTIVE_WHERE),
+        set_={
+            "signal_count": WorkItem.signal_count + 1,
+            "start_time": func.least(WorkItem.start_time, ins.excluded.start_time),
+            "last_signal_at": func.greatest(WorkItem.last_signal_at, ins.excluded.last_signal_at),
+            "updated_at": now,
+        },
+    ).returning(
+        WorkItem.id, WorkItem.component, WorkItem.priority, WorkItem.title, WorkItem.description,
+        literal_column("xmax = 0").label("created"),  # true when this statement inserted the row
+    )
+    return (await db.execute(stmt)).one()
+
+
+async def list_signals(wi_id: str, db: AsyncSession, limit: int = 200) -> list[dict]:
+    """The incident's most recent `limit` signals, oldest first, in the raw payload shape the UI reads."""
+    rows = (await db.execute(
+        select(Signal).where(Signal.work_item_id == wi_id)
+        .order_by(Signal.occurred_at.desc(), Signal.id.desc()).limit(limit)
+    )).scalars().all()
+    return [{**s.payload, "id": s.id, "work_item_id": s.work_item_id} for s in reversed(rows)]
 
 
 async def get_work_item(wi_id: str, db: AsyncSession) -> WorkItemResponse | None:
@@ -108,63 +160,75 @@ async def list_work_items(db: AsyncSession, status: str | None = None) -> list[W
     return items
 
 
-async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> WorkItemResponse:
-    result = await db.execute(
+async def _load_response(wi_id: str, db: AsyncSession) -> WorkItemResponse:
+    wi = (await db.execute(
         select(WorkItem).options(selectinload(WorkItem.assignee)).where(WorkItem.id == wi_id)
-    )
-    wi = result.scalar_one_or_none()
-    if not wi:
-        raise ValueError(f"Work item {wi_id} not found")
-
-    validate_transition(wi.status, new_status)
-
-    if new_status == "CLOSED":
-        rca = await db.execute(select(RCARecord).where(RCARecord.work_item_id == wi_id))
-        if not rca.scalar_one_or_none():
-            raise ValueError("Cannot CLOSE: RCA record missing.")
-
-    now = _now()
-    wi.status = new_status
-    wi.updated_at = now
-
-    if new_status in ("RESOLVED", "CLOSED"):
-        wi.end_time = now
-        wi.mttr_seconds = int((now - wi.start_time).total_seconds())
-
-    await db.flush()
-    await _invalidate_cache(wi_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     return _wi_to_response(wi)
 
 
+async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> WorkItemResponse:
+    """Move a Work Item through the state machine with a compare-and-set UPDATE.
+
+    The write applies only if the status is still the one we validated against (and, for CLOSED,
+    an RCA exists), so concurrent requests cannot both win. Commits before any side effect.
+    """
+    current = (await db.execute(select(WorkItem.status).where(WorkItem.id == wi_id))).scalar_one_or_none()
+    if current is None:
+        raise ValueError(f"Work item {wi_id} not found")
+
+    validate_transition(current, new_status)
+
+    conditions = [WorkItem.id == wi_id, WorkItem.status == current]
+    if new_status == "CLOSED":
+        conditions.append(exists().where(RCARecord.work_item_id == wi_id))
+    updated = (await db.execute(
+        update(WorkItem).where(*conditions).values(status=new_status, updated_at=_now()).returning(WorkItem.id)
+    )).scalar_one_or_none()
+
+    if updated is None:
+        latest = (await db.execute(select(WorkItem.status).where(WorkItem.id == wi_id))).scalar_one()
+        if latest != current:
+            raise ConflictError(f"Work item moved to {latest} while this request was in flight.")
+        raise ValueError("Cannot CLOSE: RCA record missing.")
+
+    await db.commit()
+    await invalidate_cache(wi_id)
+    return await _load_response(wi_id, db)
+
+
 async def assign_work_item(wi_id: str, assignee_id: str | None, db: AsyncSession) -> WorkItemResponse:
-    result = await db.execute(
-        select(WorkItem).options(selectinload(WorkItem.assignee)).where(WorkItem.id == wi_id)
-    )
+    result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id))
     wi = result.scalar_one_or_none()
     if not wi:
         raise ValueError(f"Work item {wi_id} not found")
     wi.assignee_id = assignee_id
     wi.updated_at = _now()
-    await db.flush()
-    await _invalidate_cache(wi_id)
-    return _wi_to_response(wi)
+    await db.commit()
+    await invalidate_cache(wi_id)
+    return await _load_response(wi_id, db)
 
 
 async def submit_rca(wi_id: str, data: RCASubmit, db: AsyncSession, user_id: str | None = None) -> RCAResponse:
-    result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id))
+    """Create or update the RCA and record MTTR (first signal -> RCA submission).
+
+    The Work Item row is locked so a concurrent CLOSE waits for this commit; once CLOSED the RCA
+    is immutable.
+    """
+    result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id).with_for_update())
     wi = result.scalar_one_or_none()
     if not wi:
         raise ValueError(f"Work item {wi_id} not found")
+    if wi.status == "CLOSED":
+        raise ConflictError("RCA is locked once the incident is CLOSED.")
     if wi.status == "OPEN":
         raise ValueError("Cannot submit RCA for OPEN incident.")
 
-    # Upsert RCA
     existing = await db.execute(select(RCARecord).where(RCARecord.work_item_id == wi_id))
     rca = existing.scalar_one_or_none()
     now = _now()
-
-    inc_start = datetime.fromisoformat(data.incident_start.replace("Z", "+00:00"))
-    inc_end = datetime.fromisoformat(data.incident_end.replace("Z", "+00:00"))
+    inc_start, inc_end = data.incident_start, data.incident_end
 
     if rca:
         rca.incident_start = inc_start
@@ -188,8 +252,13 @@ async def submit_rca(wi_id: str, data: RCASubmit, db: AsyncSession, user_id: str
         )
         db.add(rca)
 
-    await db.flush()
-    await _invalidate_cache(wi_id)
+    # MTTR per spec: start_time is the first signal, end_time is the RCA submission.
+    wi.end_time = now
+    wi.mttr_seconds = int((now - wi.start_time).total_seconds())
+    wi.updated_at = now
+
+    await db.commit()
+    await invalidate_cache(wi_id)
     return RCAResponse(
         id=rca.id,
         work_item_id=wi_id,
@@ -230,7 +299,7 @@ async def add_comment(wi_id: str, data: CommentCreate, author_id: str, db: Async
         created_at=_now(),
     )
     db.add(comment)
-    await db.flush()
+    await db.commit()  # commit before the router broadcasts comment_added
 
     # Load author username
     user = await db.get(User, author_id)
@@ -302,7 +371,8 @@ async def get_sla_stats(db: AsyncSession) -> SLAStats:
     )
 
 
-async def _invalidate_cache(wi_id: str | None = None):
+async def invalidate_cache(wi_id: str | None = None):
+    """Drop cached dashboard reads. Call only after the write has committed."""
     if wi_id:
         await cache.delete_val(f"wi:{wi_id}")
     await cache.delete_pattern("wi:list:*")

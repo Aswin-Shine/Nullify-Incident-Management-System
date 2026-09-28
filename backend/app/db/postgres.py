@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
-    String, Integer, Text, DateTime, ForeignKey,
-    CheckConstraint, Index, event
+    BigInteger, String, Integer, Text, DateTime, ForeignKey,
+    CheckConstraint, Index, UniqueConstraint, text
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from app.core.config import get_settings
 import uuid
 
@@ -34,6 +34,9 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+ACTIVE_WHERE = "status IN ('OPEN','INVESTIGATING')"
+
+
 class WorkItem(Base):
     __tablename__ = "work_items"
     __table_args__ = (
@@ -42,6 +45,9 @@ class WorkItem(Base):
         Index("ix_work_items_status", "status"),
         Index("ix_work_items_priority", "priority"),
         Index("ix_work_items_component", "component"),
+        # Debounce: at most one active incident per component, enforced across all processes.
+        Index("ux_wi_active_component", "component", unique=True,
+              postgresql_where=text(ACTIVE_WHERE)),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -55,6 +61,8 @@ class WorkItem(Base):
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     mttr_seconds: Mapped[int | None] = mapped_column(Integer)
     sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    signal_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_signal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -82,13 +90,31 @@ class RCARecord(Base):
 class TimeseriesAgg(Base):
     __tablename__ = "timeseries_agg"
     __table_args__ = (
-        Index("ix_ts_bucket_component", "bucket", "component"),
+        UniqueConstraint("bucket", "component", name="uq_ts_bucket_component"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bucket: Mapped[str] = mapped_column(String(20), nullable=False)
     component: Mapped[str] = mapped_column(String(128), nullable=False)
     signal_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Signal(Base):
+    """Raw signal linked to the Work Item it was debounced into (queryable per incident)."""
+    __tablename__ = "signals"
+    __table_args__ = (
+        Index("ix_signals_work_item_occurred", "work_item_id", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    work_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("work_items.id", ondelete="CASCADE"))
+    component: Mapped[str] = mapped_column(String(128))
+    signal_type: Mapped[str] = mapped_column(String(64))
+    severity: Mapped[str | None] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class User(Base):
@@ -136,8 +162,3 @@ async def get_db():
         except Exception:
             await session.rollback()
             raise
-
-
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)

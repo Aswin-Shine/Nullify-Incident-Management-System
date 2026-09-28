@@ -5,10 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_active_user, require_sre_or_admin
 from app.db.postgres import get_db, User
-from app.db.nosql import get_signals_for_component
 from app.models.schemas import StatusTransition, RCASubmit, CommentCreate, AssignRequest
 from app.services import work_item_service
 from app.services.state_machine import InvalidTransitionError
+from app.services.work_item_service import ConflictError
 from app.services.ws_manager import manager
 from app.services import webhooks
 
@@ -61,11 +61,9 @@ async def get_signals(
     _: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    item = await work_item_service.get_work_item(wi_id, db)
-    if not item:
+    if not await work_item_service.get_work_item(wi_id, db):
         raise HTTPException(404, "Work item not found")
-    signals = await get_signals_for_component(item.component)
-    return signals[-limit:]
+    return await work_item_service.list_signals(wi_id, db, min(max(limit, 1), 1000))
 
 
 @router.patch("/{wi_id}/status")
@@ -79,9 +77,12 @@ async def update_status(
         updated = await work_item_service.transition_status(wi_id, body.new_status, db)
     except InvalidTransitionError as e:
         raise HTTPException(400, str(e))
+    except ConflictError as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
+    # The service has committed, so listeners never see a change that could still roll back.
     data = updated.model_dump(mode="json")
     await manager.broadcast({"event": "work_item_updated", "id": wi_id, "status": body.new_status})
     await webhooks.notify_status_change(data, body.new_status)
@@ -103,21 +104,7 @@ async def assign(
     return updated.model_dump(mode="json")
 
 
-#@router.post("/{wi_id}/rca")
-# async def submit_rca(
-#     wi_id: str,
-#     body: RCASubmit,
-#     user: User = Depends(require_sre_or_admin),
-#     db: AsyncSession = Depends(get_db),
-# ):
-#     try:
-#         rca = await work_item_service.submit_rca(wi_id, body, db, user.id)
-#     except ValueError as e:
-#         raise HTTPException(422, str(e))
-#     await manager.broadcast({"event": "rca_submitted", "id": wi_id})
-#     return rca.model_dump(mode="json")
-
-@router.post("/{wi_id}/rca", response_model=None) # Added response_model=None
+@router.post("/{wi_id}/rca")
 async def submit_rca(
     wi_id: str,
     body: RCASubmit,
@@ -126,10 +113,12 @@ async def submit_rca(
 ):
     try:
         rca = await work_item_service.submit_rca(wi_id, body, db, user.id)
-        # Ensure we return a dictionary or a Pydantic-compatible object
-        return rca.model_dump(mode="json") 
+    except ConflictError as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    await manager.broadcast({"event": "rca_submitted", "id": wi_id})
+    return rca.model_dump(mode="json")
 
 
 @router.get("/{wi_id}/rca")

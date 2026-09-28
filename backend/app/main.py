@@ -9,7 +9,6 @@ from slowapi.util import get_remote_address
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging
-from app.db.postgres import init_db
 from app.db.cache import init_redis, close_redis
 from app.services.ingestion import start_ingestion_workers
 from app.middleware.observability import setup_prometheus, setup_otel
@@ -26,8 +25,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_lim
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Nullify backend [env=%s]", settings.app_env)
-    await init_redis()
-    await init_db()
+    await init_redis()  # schema is owned by Alembic: run `alembic upgrade head` before starting
     await start_ingestion_workers()
     logger.info("Nullify ready")
     yield

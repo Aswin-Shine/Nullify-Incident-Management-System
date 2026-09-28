@@ -1,5 +1,8 @@
-"""Unit tests — state machine, RCA validation, alert strategy."""
+"""Unit tests: state machine, RCA validation, alert strategy."""
+from datetime import datetime, timezone
+
 import pytest
+from pydantic import ValidationError
 from app.models.schemas import RCASubmit
 from app.services.state_machine import validate_transition, InvalidTransitionError
 from app.services.alert_strategy import get_alert_strategy
@@ -70,6 +73,23 @@ def test_rca_empty_prevention():
             root_cause_category="Human Error",
             fix_applied="Fixed", prevention_steps="",
         )
+
+def _rca(start, end):
+    return RCASubmit(incident_start=start, incident_end=end, root_cause_category="Human Error",
+                     fix_applied="Fixed", prevention_steps="Checklist")
+
+def test_rca_end_before_start_rejected():
+    with pytest.raises(ValidationError):
+        _rca("2024-01-01T12:00:00Z", "2024-01-01T10:00:00Z")
+
+def test_rca_non_datetime_rejected():
+    with pytest.raises(ValidationError):
+        _rca("yesterday", "2024-01-01T10:00:00Z")
+
+def test_rca_naive_datetime_treated_as_utc():
+    # The UI's datetime-local input sends no offset (F-06); until it does, naive means UTC.
+    rca = _rca("2024-01-01T10:00", "2024-01-01T11:00")
+    assert rca.incident_start == datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
 
 # ── Alert strategy ─────────────────────────────────────────────────────────
 
