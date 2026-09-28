@@ -40,7 +40,8 @@ export const addComment = (id, body) =>
 export const ingestSignal = (data) => api.post('/api/signals', data).then(r => r.data);
 
 // Health + analytics
-export const fetchHealth = () => api.get('/health').then(r => r.data);
+// /health answers 503 with a JSON body when degraded; show that body instead of throwing.
+export const fetchHealth = () => api.get('/health', { validateStatus: s => s < 600 }).then(r => r.data);
 export const fetchTimeseries = () => api.get('/api/timeseries', { params: { limit: 20 } }).then(r => r.data);
 export const fetchMTTR = () => api.get('/api/work-items/analytics/mttr').then(r => r.data);
 export const fetchSLA = () => api.get('/api/work-items/analytics/sla').then(r => r.data);

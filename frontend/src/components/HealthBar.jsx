@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { fetchHealth } from '../api/client';
 
 export function HealthBar({ liveEvents = [] }) {
   const [health, setHealth] = useState(null);
 
   useEffect(() => {
-    const load = () => fetchHealth().then(setHealth).catch(() => {});
+    // Unreachable backend must read as DEGRADED, not keep the last good state.
+    const load = () => fetchHealth().then(setHealth).catch(() => setHealth({ status: 'unreachable' }));
     load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
