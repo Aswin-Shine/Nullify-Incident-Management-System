@@ -1,6 +1,9 @@
 # ============================================================
-# Nullify — Docker Compose (production)
+# Nullify: Docker Compose (production)
 # Services: postgres, redis, backend, frontend
+#
+# All settings come from the project's single env file, .env at the repo root, which compose
+# reads automatically (template: .env.example). DB_HOST/REDIS_HOST/APP_ENV are overridden below.
 # ============================================================
 
 services:
@@ -13,7 +16,7 @@ services:
     environment:
       POSTGRES_DB:       ${DB_NAME:-nullify}
       POSTGRES_USER:     ${DB_USER:-nullify}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD missing, set it in .env at the repo root}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -58,7 +61,7 @@ services:
       DB_HOST:     postgres
       DB_PORT:     5432
       DB_USER:     ${DB_USER:-nullify}
-      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD missing, set it in .env at the repo root}
       DB_NAME:     ${DB_NAME:-nullify}
 
       # Redis
@@ -68,8 +71,12 @@ services:
       REDIS_DB:       ${REDIS_DB:-0}
 
       # App
-      APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY is required}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY missing, set it in .env at the repo root}  # >= 32 random chars or the app refuses to start
       APP_ENV:        production
+      # Browser origins allowed for CORS and /ws (JSON list), e.g. '["https://ims.example.com"]'
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-["http://localhost","http://127.0.0.1"]}
+      # Refresh cookie is Secure by default; set false only while serving plain HTTP (no TLS yet)
+      COOKIE_SECURE:   ${COOKIE_SECURE:-true}
       DEBUG:          "false"
 
       # Observability (optional — comment out if no Jaeger)
@@ -78,15 +85,16 @@ services:
       # Webhooks (optional)
       SLACK_WEBHOOK_URL:       ${SLACK_WEBHOOK_URL:-}
       PAGERDUTY_ROUTING_KEY:   ${PAGERDUTY_ROUTING_KEY:-}
-    ports:
-      - "8000:8000"  # Expose backend API to host
+    # No host port: nginx (frontend service) is the only entry point, which is what makes
+    # trusting X-Forwarded-For (uvicorn --proxy-headers) safe for per-IP rate limits.
+    stop_grace_period: 30s  # ingestion drains for up to SHUTDOWN_DRAIN_SECONDS (20s) on SIGTERM
     volumes:
       # Persist JSONL data lake outside the container
       - data_lake:/app/data_lake
     networks:
       - nullify-internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -106,9 +114,9 @@ services:
       DB_HOST:     postgres
       DB_PORT:     5432
       DB_USER:     ${DB_USER:-nullify}
-      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD missing, set it in .env at the repo root}
       DB_NAME:     ${DB_NAME:-nullify}
-      APP_SECRET_KEY: ${APP_SECRET_KEY:-placeholder}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY missing, set it in .env at the repo root}
       REDIS_HOST:  redis
       REDIS_PORT:  6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -131,7 +139,7 @@ services:
     networks:
       - nullify-internal
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost/"]  # nginx itself, not backend readiness
       interval: 30s
       timeout: 5s
       retries: 3
