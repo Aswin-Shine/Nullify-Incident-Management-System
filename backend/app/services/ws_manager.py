@@ -15,8 +15,8 @@ class ConnectionManager:
         self._connections: list[WebSocket] = []
         self._lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
+    async def register(self, ws: WebSocket):
+        """Add an accepted, authenticated socket to the broadcast list."""
         async with self._lock:
             self._connections.append(ws)
 

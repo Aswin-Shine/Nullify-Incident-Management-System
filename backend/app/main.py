@@ -29,11 +29,19 @@ async def lifespan(app: FastAPI):
     await close_redis()
 
 
+def docs_kwargs(s) -> dict:
+    """Interactive docs and the OpenAPI schema map the whole API: development only."""
+    if s.app_env == "production":
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 app = FastAPI(
     title="Nullify",
     version="2.0.0",
-    description="Nullify — Production-grade incident management with PostgreSQL, Redis, JWT auth, Prometheus, OTel",
+    description="Nullify: incident management with PostgreSQL, Redis, JWT auth and Prometheus",
     lifespan=lifespan,
+    **docs_kwargs(settings),
 )
 
 # Observability
@@ -43,7 +51,7 @@ setup_otel(app)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=settings.allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -129,7 +129,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin | sre | viewer
-    api_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    api_key_hash: Mapped[str | None] = mapped_column(String(64), unique=True)  # sha256; the key is shown once
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # bump to revoke tokens
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

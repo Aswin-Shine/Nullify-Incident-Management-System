@@ -1,15 +1,38 @@
-"""Central application config — reads from env vars / .env file."""
+"""Central application config: env vars first, then the repo-root .env (the project's single env file).
+
+The path is absolute so uvicorn, alembic, the CLI and tests read the same file from any working
+directory. Docker Compose reads the same root .env automatically for ${VAR} substitution; inside the
+image the file is absent and compose passes the values as env vars instead.
+"""
+from pathlib import Path
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
+DEFAULT_SECRET = "CHANGE_ME_IN_PRODUCTION_USE_LONG_RANDOM_STRING"
+ENV_FILE = str(Path(__file__).resolve().parents[3] / ".env")  # <repo>/.env
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     # App
     app_env: str = "development"
-    app_secret_key: str = "CHANGE_ME_IN_PRODUCTION_USE_LONG_RANDOM_STRING"
+    app_secret_key: str = DEFAULT_SECRET
     debug: bool = False
+
+    # Browser-facing security
+    allowed_origins: list[str] = [
+        "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost", "http://127.0.0.1",
+    ]
+    cookie_secure: bool = True          # set false only for a plain-HTTP deploy (no TLS yet)
+    ws_auth_timeout_seconds: float = 5.0
+
+    @model_validator(mode="after")
+    def _strong_secret_in_production(self) -> "Settings":
+        if self.app_env == "production" and (self.app_secret_key == DEFAULT_SECRET or len(self.app_secret_key) < 32):
+            raise ValueError("APP_SECRET_KEY must be a random string of at least 32 characters in production")
+        return self
 
     # PostgreSQL
     db_host: str = "localhost"
@@ -40,7 +63,7 @@ class Settings(BaseSettings):
 
     # JWT
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 60
+    jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 7
 
     # Data lake (JSONL files)

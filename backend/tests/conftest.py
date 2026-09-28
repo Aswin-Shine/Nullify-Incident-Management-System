@@ -2,7 +2,7 @@
 
 Postgres-only SQL (ON CONFLICT ... WHERE, conditional UPDATE ... RETURNING) is part of the
 behaviour under test, so there is no SQLite fallback. Needs local Postgres + Redis reachable
-with the credentials in backend/.env.
+with the credentials in the repo-root .env.
 """
 import asyncio
 import os
@@ -15,6 +15,7 @@ os.environ["REDIS_DB"] = "15"
 os.environ["LAKE_DIR"] = tempfile.mkdtemp(prefix="nullify-lake-")
 os.environ["OTLP_ENDPOINT"] = ""
 os.environ["DB_RETRY_BASE_DELAY"] = "0.001"
+os.environ["COOKIE_SECURE"] = "false"  # the test client talks plain http, which never sends Secure cookies
 
 import asyncpg
 import pytest
@@ -100,18 +101,35 @@ async def client(clean_state):
         yield ac
 
 
+PASSWORD = "correct-horse-battery"
+
+
 @pytest_asyncio.fixture
-async def make_headers(clean_state):
-    """Factory: insert a user with the given role and return Bearer auth headers."""
-    from app.core.security import create_access_token, hash_password
+async def make_user(clean_state):
+    """Factory: insert a user directly (no registration endpoint) and return its id/username."""
+    from app.core.security import hash_password
     from app.db.postgres import AsyncSessionLocal, User
 
-    async def _make(role: str = "sre") -> dict:
+    async def _make(role: str = "sre", hashed_password: str | None = None) -> dict:
         uid = str(uuid.uuid4())
+        username = f"u_{uid[:8]}"
         async with AsyncSessionLocal() as db:
-            db.add(User(id=uid, username=f"u_{uid[:8]}", email=f"{uid[:8]}@ims.test",
-                        hashed_password=hash_password("x"), role=role))
+            db.add(User(id=uid, username=username, email=f"{uid[:8]}@example.com",
+                        hashed_password=hashed_password or hash_password(PASSWORD), role=role))
             await db.commit()
-        return {"Authorization": f"Bearer {create_access_token({'sub': uid, 'role': role})}"}
+        return {"id": uid, "username": username, "password": PASSWORD, "role": role}
+
+    return _make
+
+
+@pytest_asyncio.fixture
+async def make_headers(make_user):
+    """Factory: insert a user with the given role and return Bearer auth headers."""
+    from app.core.security import create_access_token
+
+    async def _make(role: str = "sre") -> dict:
+        user = await make_user(role)
+        token = create_access_token({"sub": user["id"], "role": role, "tv": 0})
+        return {"Authorization": f"Bearer {token}"}
 
     return _make

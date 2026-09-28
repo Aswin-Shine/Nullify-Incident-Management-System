@@ -10,6 +10,7 @@ Or headless:
 """
 from locust import HttpUser, task, between, events
 import json
+import os
 import random
 
 COMPONENTS = [
@@ -25,33 +26,20 @@ class NullifyUser(HttpUser):
     wait_time = between(0.01, 0.05)  # ~20-100 req/sec per user
 
     def on_start(self):
-        """Login once per simulated user."""
-        global _token
-        if _token:
-            self.token = _token
-            return
+        """Authenticate like a real producer: an API key (accounts are invite-only).
 
-        # Register
-        username = f"loaduser_{random.randint(100000, 999999)}"
-        self.client.post("/api/auth/register", json={
-            "username": username,
-            "email": f"{username}@load.test",
-            "password": "LoadTest123!",
-            "role": "sre",
-        })
-        r = self.client.post("/api/auth/login", json={
-            "username": username,
-            "password": "LoadTest123!",
-        })
-        if r.status_code == 200:
-            _token = r.json()["access_token"]
-            self.token = _token
-        else:
-            self.token = None
+        Create an SRE with `python -m app.cli create-user --role sre ...`, issue it a key via
+        POST /api/auth/api-key, then run: NULLIFY_API_KEY=<key> locust -f locustfile.py
+        """
+        global _token
+        _token = _token or os.environ.get("NULLIFY_API_KEY")
+        if not _token:
+            raise RuntimeError("Set NULLIFY_API_KEY to an SRE's API key")
+        self.token = _token
 
     @property
     def _headers(self):
-        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        return {"X-API-Key": self.token}
 
     @task(10)
     def ingest_signal(self):

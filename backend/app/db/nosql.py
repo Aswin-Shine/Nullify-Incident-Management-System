@@ -6,6 +6,7 @@ audit trail (each line carries the work_item_id it was linked to, or null if per
 import asyncio
 import json
 import os
+import re
 
 import aiofiles
 
@@ -17,7 +18,7 @@ _lock = asyncio.Lock()  # ponytail: one global lock serialises all lake writes (
 def _path(component: str) -> str:
     lake_dir = get_settings().lake_dir
     os.makedirs(lake_dir, exist_ok=True)
-    safe = component.replace("/", "_").replace(":", "_")
+    safe = re.sub(r"[^A-Z0-9_.-]", "_", component.upper())[:64] or "UNKNOWN"  # allowlist, not blocklist
     return os.path.join(lake_dir, f"{safe}.jsonl")
 
 

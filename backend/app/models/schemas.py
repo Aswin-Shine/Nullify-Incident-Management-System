@@ -1,6 +1,8 @@
 """Pydantic schemas for Nullify."""
 from __future__ import annotations
-from pydantic import BaseModel, field_validator, model_validator, EmailStr
+import json
+import re
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from typing import Optional, Literal
 from datetime import datetime, timezone
 
@@ -17,10 +19,15 @@ ROOT_CAUSE_CATEGORIES = [
 # ── Auth ──────────────────────────────────────────────────────────────────
 
 class UserCreate(BaseModel):
-    username: str
-    email: str
-    password: str
+    """Admin-only (accounts are invite-only)."""
+    username: str = Field(pattern=r"^[A-Za-z0-9_.-]{3,64}$")
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
     role: Role = "viewer"
+
+class UserUpdate(BaseModel):
+    role: Optional[Role] = None
+    is_active: Optional[bool] = None
 
 class UserResponse(BaseModel):
     id: str
@@ -29,37 +36,53 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
-    api_key: Optional[str] = None
+
+class UserPublic(BaseModel):
+    """What SREs need to pick an assignee: never keys, hashes or emails."""
+    id: str
+    username: str
+    role: str
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 class TokenResponse(BaseModel):
+    """The refresh token travels only in the httpOnly cookie, never in a body."""
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     user: UserResponse
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
+class ApiKeyResponse(BaseModel):
+    api_key: str  # shown once; only its sha256 is stored
 
 # ── Signals ───────────────────────────────────────────────────────────────
 
+MAX_METADATA_BYTES = 8192
+_COMPONENT_ID = re.compile(r"[A-Z0-9][A-Z0-9_.-]{0,63}")
+
 class SignalPayload(BaseModel):
     component_id: str
-    signal_type: str
-    message: str
-    severity: Optional[str] = "MEDIUM"
+    signal_type: str = Field(max_length=64)
+    message: str = Field(max_length=4096)
+    severity: Optional[str] = Field("MEDIUM", max_length=32)
     metadata: Optional[dict] = {}
     timestamp: Optional[datetime] = None  # producer event time; ingestion clamps future values
 
     @field_validator("component_id")
     @classmethod
-    def no_empty_component(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("component_id cannot be blank")
-        return v.strip().upper()
+    def valid_component(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not _COMPONENT_ID.fullmatch(v):  # also becomes a lake file name
+            raise ValueError("component_id must be 1-64 chars of A-Z, 0-9, '_', '.', '-'")
+        return v
+
+    @field_validator("metadata")
+    @classmethod
+    def bounded_metadata(cls, v: Optional[dict]) -> Optional[dict]:
+        if v and len(json.dumps(v, default=str)) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata must serialize to at most {MAX_METADATA_BYTES} bytes")
+        return v
 
 # ── Work Items ────────────────────────────────────────────────────────────
 

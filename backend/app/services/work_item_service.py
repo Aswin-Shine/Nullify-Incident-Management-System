@@ -203,6 +203,8 @@ async def assign_work_item(wi_id: str, assignee_id: str | None, db: AsyncSession
     wi = result.scalar_one_or_none()
     if not wi:
         raise ValueError(f"Work item {wi_id} not found")
+    if assignee_id is not None and await db.get(User, assignee_id) is None:
+        raise ValueError("Assignee not found")  # 422 instead of a foreign-key 500 at commit
     wi.assignee_id = assignee_id
     wi.updated_at = _now()
     await db.commit()

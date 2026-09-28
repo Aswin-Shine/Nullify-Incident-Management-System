@@ -11,8 +11,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.deps import get_current_active_user
 from app.db import cache
-from app.db.postgres import get_db
+from app.db.postgres import User, get_db
 from app.services import ingestion
 from app.services.ingestion import _queue
 
@@ -61,6 +62,7 @@ async def health(db: AsyncSession = Depends(get_db)):
 async def timeseries(
     component: str | None = None,
     limit: int = 60,
+    _: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     if component:

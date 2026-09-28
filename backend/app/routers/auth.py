@@ -1,81 +1,117 @@
-"""Auth router — register, login, refresh, API key management."""
-from __future__ import annotations
-import logging
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+"""Auth router: invite-only accounts, cookie-based sessions, API keys.
 
-from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token, generate_api_key
-from app.core.deps import get_current_active_user, require_admin
+Session model: login returns a short-lived access token (kept only in browser memory) and sets the
+refresh token as an httpOnly, SameSite=Strict cookie scoped to /api/auth. Refresh and logout also
+require an X-Requested-With header, which a cross-site page cannot send without a CORS preflight.
+Changing a user's role, deactivating them, or logging out bumps token_version, revoking every
+token issued before.
+"""
+from __future__ import annotations
+import asyncio
+import logging
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import get_settings
+from app.core.deps import get_current_active_user, require_admin, require_sre_or_admin, user_from_access_token
 from app.core.rate_limit import auth_limit
+from app.core.security import (
+    create_access_token, create_refresh_token, decode_token, generate_api_key, hash_api_key,
+    hash_password, verify_password,
+)
 from app.db.postgres import get_db, User
-from app.models.schemas import UserCreate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
+from app.models.schemas import (
+    ApiKeyResponse, LoginRequest, TokenResponse, UserCreate, UserPublic, UserResponse, UserUpdate,
+)
+from app.services.user_service import create_account
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-logger = logging.getLogger("ims.auth")
+security_log = logging.getLogger("ims.security")
+
+REFRESH_COOKIE = "nullify_refresh"
+COOKIE_PATH = "/api/auth"
+_DUMMY_HASH = hash_password(secrets.token_hex(8))  # equalises timing for unknown usernames
+
+
+def _ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def _user_resp(u: User) -> UserResponse:
-    return UserResponse(
-        id=u.id, username=u.username, email=u.email,
-        role=u.role, is_active=u.is_active, created_at=u.created_at,
-        api_key=u.api_key,
-    )
+    return UserResponse(id=u.id, username=u.username, email=u.email, role=u.role,
+                        is_active=u.is_active, created_at=u.created_at)
 
 
-@router.post("/register", response_model=UserResponse, status_code=201, dependencies=[Depends(auth_limit)])
-async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(User).where(User.username == data.username))
-    if existing.scalar_one_or_none():
-        raise HTTPException(400, "Username already taken")
+def _claims(u: User) -> dict:
+    return {"sub": u.id, "role": u.role, "tv": u.token_version}
 
-    user = User(
-        username=data.username,
-        email=data.email,
-        hashed_password=hash_password(data.password),
-        role=data.role,
-        api_key=generate_api_key(),
-    )
-    db.add(user)
-    await db.flush()
-    logger.info("New user registered: %s (%s)", user.username, user.role)
-    return _user_resp(user)
+
+def _cookie_attrs() -> dict:
+    return {"httponly": True, "secure": get_settings().cookie_secure, "samesite": "strict", "path": COOKIE_PATH}
+
+
+def _session(response: Response, user: User) -> TokenResponse:
+    """Issue a fresh access token and (re)set the refresh cookie."""
+    response.set_cookie(REFRESH_COOKIE, create_refresh_token(_claims(user)),
+                        max_age=get_settings().jwt_refresh_token_expire_days * 86400, **_cookie_attrs())
+    return TokenResponse(access_token=create_access_token(_claims(user)), user=_user_resp(user))
+
+
+def require_csrf_header(request: Request) -> None:
+    if request.headers.get("x-requested-with") != "nullify":
+        raise HTTPException(403, "Missing X-Requested-With header")
+
+
+async def _user_from_refresh_cookie(request: Request, db: AsyncSession) -> User | None:
+    payload = decode_token(request.cookies.get(REFRESH_COOKIE, ""))
+    if not payload or payload.get("type") != "refresh":
+        return None
+    user = (await db.execute(
+        select(User).where(User.id == payload["sub"], User.is_active == True)  # noqa: E712
+    )).scalar_one_or_none()
+    return user if user and payload.get("tv") == user.token_version else None
+
+
+# ── Sessions ──────────────────────────────────────────────────────────────
 
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(auth_limit)])
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.username == data.username))
-    user = result.scalar_one_or_none()
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+async def login(data: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    user = (await db.execute(select(User).where(User.username == data.username))).scalar_one_or_none()
+    ok = await asyncio.to_thread(verify_password, data.password, user.hashed_password if user else _DUMMY_HASH)
+    if not user or not ok:
+        security_log.warning("login_failed username=%s ip=%s", data.username, _ip(request))
+        raise HTTPException(401, "Invalid credentials")
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account disabled")
-
-    token_data = {"sub": user.id, "role": user.role}
-    return TokenResponse(
-        access_token=create_access_token(token_data),
-        refresh_token=create_refresh_token(token_data),
-        user=_user_resp(user),
-    )
+        security_log.warning("login_blocked_inactive user=%s ip=%s", user.username, _ip(request))
+        raise HTTPException(403, "Account disabled")
+    return _session(response, user)
 
 
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
-    payload = decode_token(data.refresh_token)
-    if not payload or payload.get("type") != "refresh":
-        raise HTTPException(401, "Invalid refresh token")
+@router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(require_csrf_header)])
+async def refresh(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    user = await _user_from_refresh_cookie(request, db)
+    if user is None:
+        raise HTTPException(401, "Session expired")
+    return _session(response, user)  # rotates the refresh cookie
 
-    result = await db.execute(select(User).where(User.id == payload["sub"]))
-    user = result.scalar_one_or_none()
-    if not user or not user.is_active:
-        raise HTTPException(401, "User not found or inactive")
 
-    token_data = {"sub": user.id, "role": user.role}
-    return TokenResponse(
-        access_token=create_access_token(token_data),
-        refresh_token=create_refresh_token(token_data),
-        user=_user_resp(user),
-    )
+@router.post("/logout", status_code=204, dependencies=[Depends(require_csrf_header)])
+async def logout(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await _user_from_refresh_cookie(request, db)
+    if user is None and request.headers.get("authorization", "").lower().startswith("bearer "):
+        user = await user_from_access_token(request.headers["authorization"][7:], db)
+    if user is not None:
+        # ponytail: revokes every session of this user; per-session revocation needs a jti store.
+        user.token_version += 1
+        await db.commit()
+        security_log.info("logout user=%s", user.username)
+    response = Response(status_code=204)
+    response.delete_cookie(REFRESH_COOKIE, **_cookie_attrs())
+    return response
 
 
 @router.get("/me", response_model=UserResponse)
@@ -83,22 +119,51 @@ async def me(user: User = Depends(get_current_active_user)):
     return _user_resp(user)
 
 
-@router.post("/rotate-api-key", response_model=UserResponse)
-async def rotate_api_key(
-    user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(User).where(User.id == user.id))
-    u = result.scalar_one()
-    u.api_key = generate_api_key()
-    await db.flush()
-    return _user_resp(u)
+@router.post("/api-key", response_model=ApiKeyResponse)
+async def rotate_api_key(user: User = Depends(get_current_active_user), db: AsyncSession = Depends(get_db)):
+    """Issue a new API key (the previous one stops working). The key is shown only in this response."""
+    key = generate_api_key()
+    user.api_key_hash = hash_api_key(key)
+    await db.commit()
+    security_log.info("api_key_rotated user=%s", user.username)
+    return ApiKeyResponse(api_key=key)
 
 
-@router.get("/users", response_model=list[UserResponse])
-async def list_users(
-    _: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(User).order_by(User.created_at))
-    return [_user_resp(u) for u in result.scalars().all()]
+# ── Accounts (invite-only) ────────────────────────────────────────────────
+
+
+@router.get("/users", response_model=list[UserPublic])
+async def list_users(_: User = Depends(require_sre_or_admin), db: AsyncSession = Depends(get_db)):
+    """Active users, for picking an assignee."""
+    rows = (await db.execute(
+        select(User).where(User.is_active == True).order_by(User.username)  # noqa: E712
+    )).scalars().all()
+    return [UserPublic(id=u.id, username=u.username, role=u.role) for u in rows]
+
+
+@router.post("/users", response_model=UserResponse, status_code=201)
+async def create_user(data: UserCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    try:
+        user = await create_account(db, data, created_by=admin.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _user_resp(user)
+
+
+@router.patch("/users/{user_id}", response_model=UserResponse)
+async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(require_admin),
+                      db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    if data.role is not None and data.role != user.role:
+        security_log.info("role_changed by=%s user=%s from=%s to=%s", admin.username, user.username, user.role, data.role)
+        user.role = data.role
+        user.token_version += 1  # old tokens carry the old role
+    if data.is_active is not None and data.is_active != user.is_active:
+        security_log.info("user_%s by=%s user=%s", "activated" if data.is_active else "deactivated",
+                          admin.username, user.username)
+        user.is_active = data.is_active
+        user.token_version += 1
+    await db.commit()
+    return _user_resp(user)
