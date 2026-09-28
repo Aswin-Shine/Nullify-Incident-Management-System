@@ -1,22 +1,55 @@
 import axios from 'axios';
 
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Same-origin by default: nginx (Docker) or the Vite dev proxy forwards /api, /ws and /health.
+const BASE = import.meta.env.VITE_API_URL ?? '';
 
 export const api = axios.create({ baseURL: BASE });
 
-// Inject token on every request
+// The access token lives only in memory. The refresh token is an httpOnly cookie that the browser
+// sends to /api/auth/* on its own; nothing auth-related is ever written to localStorage.
+let accessToken = null;
+export const getAccessToken = () => accessToken;
+
+let onSessionExpired = () => {};
+export const setOnSessionExpired = (fn) => { onSessionExpired = fn; };
+
+const CSRF = { 'X-Requested-With': 'nullify' };
+const NO_AUTO_REFRESH = /\/api\/auth\/(login|refresh|logout)$/;
+
 api.interceptors.request.use(cfg => {
-  const token = localStorage.getItem('ims_token');
-  if (token) cfg.headers.Authorization = `Bearer ${token}`;
+  if (accessToken) cfg.headers.Authorization = `Bearer ${accessToken}`;
   return cfg;
 });
 
+// One refresh in flight at a time: concurrent 401s all wait for the same request.
+let refreshing = null;
+export function refreshSession() {
+  refreshing ??= axios.post(`${BASE}/api/auth/refresh`, null, { headers: CSRF })
+    .then(r => { accessToken = r.data.access_token; return r.data; })
+    .finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+// An expired access token gets one silent refresh + retry; if that fails the session is over.
+api.interceptors.response.use(undefined, async (error) => {
+  const { config, response } = error;
+  if (response?.status !== 401 || config._retried || NO_AUTO_REFRESH.test(config.url)) throw error;
+  config._retried = true;
+  try {
+    await refreshSession();
+  } catch {
+    accessToken = null;
+    onSessionExpired();
+    throw error;
+  }
+  return api(config);
+});
+
 // Auth
-export const login = (d) => api.post('/api/auth/login', d).then(r => r.data);
-export const register = (d) => api.post('/api/auth/register', d).then(r => r.data);
-export const refreshToken = (refresh_token) => api.post('/api/auth/refresh', { refresh_token }).then(r => r.data);
+export const login = (d) => api.post('/api/auth/login', d).then(r => { accessToken = r.data.access_token; return r.data; });
+export const logout = () => api.post('/api/auth/logout', null, { headers: CSRF }).finally(() => { accessToken = null; });
 export const getMe = () => api.get('/api/auth/me').then(r => r.data);
-export const rotateApiKey = () => api.post('/api/auth/rotate-api-key').then(r => r.data);
+export const rotateApiKey = () => api.post('/api/auth/api-key').then(r => r.data);
 export const listUsers = () => api.get('/api/auth/users').then(r => r.data);
 
 // Work items

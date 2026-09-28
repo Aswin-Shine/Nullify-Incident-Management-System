@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { login as apiLogin, getMe } from '../api/client'
+import { login as apiLogin, logout as apiLogout, refreshSession, setOnSessionExpired } from '../api/client'
 
 const AuthContext = createContext(null)
 
@@ -8,28 +8,26 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const token = localStorage.getItem('ims_token')
-    if (token) {
-      getMe().then(setUser).catch(() => {
-        localStorage.removeItem('ims_token')
-      }).finally(() => setLoading(false))
-    } else {
-      setLoading(false)
-    }
+    setOnSessionExpired(() => setUser(null))
+    // A still-valid httpOnly refresh cookie restores the session after a page reload.
+    refreshSession()
+      .then(data => setUser(data.user))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
   const login = useCallback(async (username, password) => {
     const data = await apiLogin({ username, password })
-    localStorage.setItem('ims_token', data.access_token)
-    localStorage.setItem('ims_refresh', data.refresh_token)
     setUser(data.user)
     return data
   }, [])
 
-  const logout = useCallback(() => {
-    localStorage.removeItem('ims_token')
-    localStorage.removeItem('ims_refresh')
-    setUser(null)
+  const logout = useCallback(async () => {
+    try {
+      await apiLogout()
+    } finally {
+      setUser(null)
+    }
   }, [])
 
   return (
