@@ -390,8 +390,8 @@ _Figure 2: Automated pipeline from commit to production deployment with zero-dow
 ### 1. Configure environment
 
 ```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env — set DB_USER, DB_PASSWORD, DB_NAME, etc.
+cp .env.example .env
+# Edit .env (repo root): set DB_USER, DB_PASSWORD, DB_NAME, etc.
 ```
 
 ### 2. Create the database
@@ -595,8 +595,7 @@ nullify/
 ├── docker-compose.yml             # 4-service stack: postgres, redis, backend, frontend
 ├── mock_events.py                 # Failure simulation: RDBMS cascade + 110-signal burst
 ├── start.sh                       # One-command local dev start (no Docker)
-├── .env                           # Root-level env (docker-compose reads this)
-├── .env.docker                    # Docker-specific env overrides
+├── .env                           # The single env file (backend + docker compose); template: .env.example
 └── README.md
 ```
 
@@ -624,8 +623,8 @@ cd nullify
 **2. Configure environment variables**:
 
 ```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env with your database credentials
+cp .env.example .env
+# Edit .env (repo root) with your database credentials
 ```
 
 **3. Start all services**:
@@ -681,7 +680,7 @@ npm run dev
 
 ### Backend Environment Variables
 
-Create `backend/.env` with the following configuration:
+Create `.env` at the repo root (copy `.env.example`) with the following configuration:
 
 | Variable                          | Description                                | Example                       | Required |
 | --------------------------------- | ------------------------------------------ | ----------------------------- | -------- |
