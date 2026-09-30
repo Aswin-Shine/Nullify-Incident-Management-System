@@ -1,178 +1,166 @@
-import React, { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { PriorityBadge, StatusBadge } from './Badges';
 import { RCAForm } from './RCAForm';
 import { CommentsSection } from './CommentsSection';
-import { fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers } from '../api/client';
-import { useAuth } from '../context/AuthContext';
+import { ErrorNote } from './ErrorNote';
+import {
+  fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers, errorMessage,
+} from '../api/client';
+import { useAuth, canWrite } from '../context/auth';
+import { useQuery } from '../hooks/useQuery';
+import { useNow } from '../hooks/useNow';
+import { avatarColor, fmtMTTR } from '../format';
 
-function avatarColor(name = '') {
-  const hash = [...name].reduce((acc, c) => c.charCodeAt(0) + ((acc << 5) - acc), 0);
-  return `hsl(${Math.abs(hash) % 360}, 60%, 55%)`;
-}
-
-function fmtMTTR(s) {
-  if (!s) return null;
-  if (s < 60) return `${Math.round(s)}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
+const NEXT = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] };
+const TRANSITION_LABEL = { INVESTIGATING: 'Start Investigating', RESOLVED: 'Mark Resolved', CLOSED: 'Close Incident' };
+const SEVERITY_LEVEL = { CRITICAL: 'p0', HIGH: 'p1', MEDIUM: 'p2', LOW: 'p3' };
 
 function SlaChip({ deadline, status }) {
-  const [now, setNow] = useState(new Date());
-  useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+  const now = useNow();
   if (!deadline || ['RESOLVED', 'CLOSED'].includes(status)) return null;
   const diff = new Date(deadline) - now;
-  if (diff <= 0) return <span style={{ padding: '4px 12px', borderRadius: 20, background: 'var(--p0-bg)', color: 'var(--p0-color)', fontSize: 11, fontWeight: 700, animation: 'pulse 1.5s infinite' }}>SLA BREACHED</span>;
+  if (diff <= 0) return <span className="sla-chip breached" data-level="p0">SLA BREACHED</span>;
   const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
-  const col = diff < 300000 ? 'var(--p0-color)' : diff < 1800000 ? 'var(--p2-color)' : 'var(--p3-color)';
-  const bg  = diff < 300000 ? 'var(--p0-bg)' : diff < 1800000 ? 'var(--p2-bg)' : 'var(--p3-bg)';
-  return <span style={{ padding: '4px 12px', borderRadius: 20, background: bg, color: col, fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>SLA {h > 0 ? `${h}h ` : ''}{m}m {s}s</span>;
+  const level = diff < 300000 ? 'p0' : diff < 1800000 ? 'p2' : 'p3';
+  return <span className="sla-chip" data-level={level}>SLA {h > 0 ? `${h}h ` : ''}{m}m {s}s</span>;
 }
 
-export function IncidentDetail({ id, onRefresh }) {
+export function IncidentDetail({ id, onRefresh, refreshTick }) {
   const { user } = useAuth();
-  const [incident, setIncident]       = useState(null);
-  const [signals, setSignals]         = useState([]);
-  const [users, setUsers]             = useState([]);
-  const [rcaExists, setRcaExists]     = useState(false);
+  const write = canWrite(user);
   const [signalsOpen, setSignalsOpen] = useState(false);
-  const [transitioning, setTransit]   = useState(null);
-  const [loading, setLoading]         = useState(false);
+  const [transitioning, setTransit] = useState(null);
+  const [actionError, setActionError] = useState('');
 
-  const load = async () => {
-    if (!id) return;
-    setLoading(true);
+  const wi = useQuery(id, () => fetchWorkItem(id), refreshTick);
+  const signals = useQuery(id, () => fetchSignals(id), refreshTick);
+  const rca = useQuery(id, () => fetchRCA(id), refreshTick);
+  // Only people who can assign need the user list (viewers get a 403 for it).
+  const users = useQuery(write ? 'users' : null, listUsers);
+
+  // A mutation returns the updated work item, so render it instead of refetching.
+  const mutate = async (call) => {
+    setActionError('');
     try {
-      // FIX: use fetchWorkItem → /api/work-items/:id (not /api/incidents/:id)
-      const wi = await fetchWorkItem(id);
-      setIncident(wi);
-      // supplementary — don't block main load
-      fetchSignals(id).then(setSignals).catch(() => {});
-      listUsers().then(setUsers).catch(() => {});
-      fetchRCA(id).then(r => setRcaExists(!!r)).catch(() => {});
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
+      wi.setData(await call());
+      onRefresh?.();
+    } catch (e) {
+      setActionError(errorMessage(e, 'Action failed'));
+    }
   };
-
-  useEffect(() => { load(); setIncident(null); }, [id]);
-
-  const doTransition = async (newStatus) => {
-    if (newStatus === 'CLOSED' && !rcaExists) return;
-    setTransit(newStatus);
-    try {
-      // FIX: updateStatus → PATCH /api/work-items/:id/status
-      await updateStatus(id, newStatus);
-      await load(); onRefresh?.();
-    } catch (e) { console.error(e); }
-    finally { setTransit(null); }
+  const doTransition = async (status) => {
+    setTransit(status);
+    await mutate(() => updateStatus(id, status));
+    setTransit(null);
   };
 
   if (!id) return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', gap: 12 }}>
-      <div style={{ fontSize: 64, opacity: 0.15 }}>∅</div>
-      <h3 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-secondary)' }}>Select an incident</h3>
-      <p style={{ fontSize: 13 }}>Real-time telemetry will appear here.</p>
+    <div className="empty-state detail-empty">
+      <div className="empty-mark">∅</div>
+      <h3>Select an incident</h3>
+      <p>Real-time telemetry will appear here.</p>
     </div>
   );
 
-  if (loading && !incident) return (
-    <div style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {[200, 140, 100].map((w, i) => <div key={i} className="shimmer" style={{ height: 20, width: w }} />)}
-    </div>
-  );
+  const incident = wi.data;
+  if (!incident) {
+    if (wi.error) return <div className="detail"><ErrorNote>{errorMessage(wi.error, 'Could not load incident')}</ErrorNote></div>;
+    return (
+      <div className="detail-skeleton">
+        {[200, 140, 100].map((w, i) => <div key={i} className="shimmer" style={{ height: 20, width: w }} />)}
+      </div>
+    );
+  }
 
-  if (!incident) return null;
-
-  const assignedUser = users.find(u => u.id === incident.assignee_id);
   const mttr = fmtMTTR(incident.mttr_seconds);
-  const transitions = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] }[incident.status] || [];
-  const transStyle = {
-    INVESTIGATING: { bg: 'var(--p2-bg)', color: 'var(--p2-color)', label: 'Start Investigating' },
-    RESOLVED:      { bg: 'var(--p3-bg)', color: 'var(--success)',   label: 'Mark Resolved' },
-    CLOSED:        { bg: 'var(--bg-raised)', color: 'var(--text-secondary)', label: 'Close Incident' },
-  };
+  const transitions = write ? NEXT[incident.status] || [] : [];
+  const signalList = signals.data ?? [];
 
   return (
-    <div style={{ padding: '28px 32px', overflowY: 'auto', height: '100%', animation: 'slideDown 0.3s' }}>
-
-      {/* Header card */}
-      <div className="glass" style={{ padding: 24, borderRadius: 16, marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+    <div className="detail">
+      <div className="glass detail-card">
+        <div className="detail-badges">
           <PriorityBadge priority={incident.priority} />
           <StatusBadge status={incident.status} />
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-            {mttr && <span style={{ padding: '4px 10px', borderRadius: 6, background: 'var(--p3-bg)', color: 'var(--success)', fontSize: 11, fontWeight: 600 }}>MTTR: {mttr}</span>}
+          <div className="detail-badges-right">
+            {mttr && <span className="mttr-chip">MTTR: {mttr}</span>}
             <SlaChip deadline={incident.sla_deadline} status={incident.status} />
           </div>
         </div>
 
-        {/* FIX: component_id, not component */}
-        <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{incident.component_id}</h1>
-        <p style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-tertiary)', marginBottom: 20, fontVariantNumeric: 'tabular-nums' }}>
+        <h1>{incident.component}</h1>
+        <p className="detail-meta">
           #{incident.id} · Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}
         </p>
 
-        {/* Assignee */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          {assignedUser ? (
+        <div className="assignee">
+          {incident.assignee_username ? (
             <>
-              <div style={{ width: 24, height: 24, borderRadius: '50%', background: avatarColor(assignedUser.username), color: '#fff', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {assignedUser.username[0].toUpperCase()}
+              <div className="avatar avatar-lg" style={{ background: avatarColor(incident.assignee_username) }}>
+                {incident.assignee_username[0].toUpperCase()}
               </div>
-              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Assigned to <strong style={{ color: 'var(--text-primary)' }}>{assignedUser.username}</strong></span>
+              <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
             </>
-          ) : (
-            <select onChange={e => { if (e.target.value) assignWorkItem(id, e.target.value).then(load); }} defaultValue="" style={{ width: 'auto', maxWidth: 220 }}>
-              <option value="" disabled>Unassigned — assign to…</option>
-              {users.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
+          ) : write ? (
+            <select aria-label="Assign to" className="assign-select" defaultValue=""
+              onChange={e => { if (e.target.value) mutate(() => assignWorkItem(id, e.target.value)); }}>
+              <option value="" disabled>Unassigned, assign to…</option>
+              {(users.data ?? []).map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
             </select>
+          ) : (
+            <span className="assignee-text">Unassigned</span>
           )}
         </div>
 
-        {/* Transition buttons */}
         {transitions.length > 0 && (
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div className="transitions">
             {transitions.map(st => {
-              const s = transStyle[st];
-              const blocked = st === 'CLOSED' && !rcaExists;
+              const blocked = st === 'CLOSED' && !rca.data;
               return (
-                <button key={st} onClick={() => doTransition(st)} disabled={!!transitioning || blocked} title={blocked ? 'Submit RCA first' : ''} style={{ height: 36, padding: '0 20px', background: blocked ? 'transparent' : s.bg, color: blocked ? 'var(--text-tertiary)' : s.color, border: `1px solid ${blocked ? 'var(--border-default)' : 'transparent'}`, borderRadius: 20, fontSize: 13, fontWeight: 500, opacity: blocked ? 0.5 : 1 }}>
-                  {transitioning === st ? <span className="spinner" /> : s.label}
+                <button type="button" key={st} className="transition-btn" data-to={st} data-blocked={blocked}
+                  onClick={() => doTransition(st)} disabled={!!transitioning || blocked}
+                  title={blocked ? 'Submit RCA first' : ''}>
+                  {transitioning === st ? <span className="spinner" /> : TRANSITION_LABEL[st]}
                 </button>
               );
             })}
           </div>
         )}
+        {actionError && <ErrorNote>{actionError}</ErrorNote>}
       </div>
 
-      {/* Signals */}
-      <div style={{ marginBottom: 20 }}>
-        <div onClick={() => setSignalsOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', marginBottom: signalsOpen ? 12 : 0, gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Signals ({signals.length})</span>
-          <span style={{ fontSize: 10, display: 'inline-block', transition: 'transform 0.2s', transform: signalsOpen ? 'rotate(90deg)' : 'none', color: 'var(--text-tertiary)' }}>›</span>
-        </div>
+      <div className="signals">
+        <button type="button" className="btn-bare signals-toggle" aria-expanded={signalsOpen}
+          onClick={() => setSignalsOpen(o => !o)}>
+          <span className="signals-title">Signals ({signalList.length})</span>
+          <span className="signals-caret" aria-hidden="true">›</span>
+        </button>
         {signalsOpen && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, animation: 'slideDown 0.2s' }}>
-            {signals.map((s, i) => (
-              <div key={s.id || i} style={{ background: 'var(--bg-raised)', padding: '6px 12px', borderRadius: 8, fontSize: 11, border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ color: 'var(--p0-color)' }}>●</span>
-                {/* FIX: signal_type not type */}
-                {s.signal_type} · {formatDistanceToNow(new Date(s.created_at), { addSuffix: true })}
+          <div className="signal-list">
+            {signalList.map(s => (
+              <div key={s.id} className="signal">
+                <span className="signal-dot" data-level={SEVERITY_LEVEL[s.severity] ?? 'p2'} aria-hidden="true">●</span>
+                <span className="signal-msg">{s.message}</span>
+                <span className="signal-meta">
+                  {[s.severity, s.timestamp && formatDistanceToNow(new Date(s.timestamp), { addSuffix: true })].filter(Boolean).join(' · ')}
+                </span>
               </div>
             ))}
-            {signals.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>No signals yet.</span>}
+            {signalList.length === 0 && <span className="muted">No signals yet.</span>}
           </div>
         )}
       </div>
 
-      <div style={{ borderTop: '1px solid var(--border-subtle)', marginBottom: 20 }} />
-      <div style={{ marginBottom: 20 }}>
-        <RCAForm workItem={incident} onSuccess={() => { setRcaExists(true); load(); onRefresh?.(); }} />
+      <hr className="divider" />
+      <div className="detail-section">
+        {!rca.loading && (
+          <RCAForm workItem={incident} rca={rca.data} readOnly={!write}
+            onSuccess={(created) => { rca.setData(created); onRefresh?.(); }} />
+        )}
       </div>
-      <div style={{ borderTop: '1px solid var(--border-subtle)', marginBottom: 20 }} />
-      {/* FIX: pass id (number/string), not incident.id via wiId */}
-      <CommentsSection wiId={id} />
+      <hr className="divider" />
+      <CommentsSection wiId={id} refreshTick={refreshTick} />
     </div>
   );
 }

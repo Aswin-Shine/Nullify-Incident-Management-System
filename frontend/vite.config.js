@@ -7,6 +7,7 @@ const backend = globalThis.process?.env.NULLIFY_BACKEND ?? 'http://localhost:800
 
 export default defineConfig({
   plugins: [react()],
+  test: { environment: 'jsdom', globals: true },
   server: {
     proxy: {
       '/api': backend,

@@ -18,44 +18,34 @@ export function HealthBar({ liveEvents = [] }) {
   const qPct   = Math.round((qDepth / qCap) * 100);
 
   return (
-    <div style={{ height: 32, background: 'var(--bg-surface)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', padding: '0 24px', justifyContent: 'space-between', position: 'relative', zIndex: 50, flexShrink: 0 }}>
-
-      {/* Left: status + queue */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: isHealthy ? 'var(--success)' : 'var(--error)', boxShadow: `0 0 10px ${isHealthy ? 'var(--success)' : 'var(--error)'}`, animation: 'pulse 2s infinite' }} />
-          <span style={{ fontSize: 11, fontWeight: 600, color: isHealthy ? 'var(--success)' : 'var(--error)', letterSpacing: '0.04em' }}>
-            {isHealthy ? 'HEALTHY' : 'DEGRADED'}
-          </span>
+    <div className="health-bar">
+      <div className="health-left">
+        <div className="health-state" data-ok={isHealthy}>
+          <div className="health-dot" />
+          <span>{isHealthy ? 'HEALTHY' : 'DEGRADED'}</span>
         </div>
-        <div style={{ height: 12, width: 1, background: 'var(--border-subtle)' }} />
-        <div style={{ display: 'flex', gap: 8 }}>
-          <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
-          <span style={{ fontSize: 10, color: qPct > 80 ? 'var(--warning)' : 'var(--text-tertiary)', fontWeight: qPct > 80 ? 600 : 400 }}>{qPct}%</span>
+        <div className="health-sep" />
+        <div className="health-queue">
+          <span>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
+          <span className="queue-pct" data-hot={qPct > 80}>{qPct}%</span>
         </div>
       </div>
 
-      {/* Middle: live event pills scrolling */}
-      <div style={{ flex: 1, overflow: 'hidden', margin: '0 40px' }}>
+      <div className="health-feed">
         {liveEvents.length > 0 ? (
-          <div style={{ display: 'flex', gap: 12, whiteSpace: 'nowrap' }}>
+          <div className="feed-list">
             {liveEvents.map((e, i) => (
-              <span key={i} style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-raised)', padding: '1px 8px', borderRadius: 4, border: '1px solid var(--border-subtle)', opacity: 1 - i * 0.15, animation: i === 0 ? 'slideInLeft 0.3s' : 'none' }}>
-                {e}
-              </span>
+              <span key={i} className="feed-item" data-first={i === 0} style={{ opacity: 1 - i * 0.15 }}>{e}</span>
             ))}
           </div>
         ) : (
-          <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>Waiting for signals… ∅ Ingestion pipeline active</span>
+          <span className="feed-idle">Waiting for signals… ∅ Ingestion pipeline active</span>
         )}
       </div>
 
-      {/* Right: last 3 event type chips */}
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div className="health-right">
         {liveEvents.slice(0, 3).map((e, i) => (
-          <div key={i} style={{ padding: '2px 8px', background: 'var(--bg-raised)', borderRadius: 4, fontSize: 10, color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', animation: i === 0 ? 'slideInLeft 0.3s' : 'none' }}>
-            {e}
-          </div>
+          <div key={i} className="feed-chip" data-first={i === 0}>{e}</div>
         ))}
       </div>
     </div>

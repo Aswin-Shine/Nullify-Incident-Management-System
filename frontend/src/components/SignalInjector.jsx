@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { ingestSignal } from '../api/client';
+import { useState } from 'react';
+import { ingestSignal, errorMessage } from '../api/client';
+import { Field } from './Field';
 
 const COMPONENTS = ['RDBMS_PRIMARY','RDBMS_REPLICA','CACHE_CLUSTER_01','KAFKA_BROKER_01','API_GATEWAY','MCP_HOST_01','REDIS_CACHE','SQS_QUEUE_01'];
 const SIGNAL_TYPES = ['ERROR','LATENCY_SPIKE','TIMEOUT','CONNECTION_REFUSED','OOM','DISK_FULL'];
@@ -9,7 +10,8 @@ export function SignalInjector({ onSent }) {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState(null);
 
-  const handleInject = async () => {
+  const handleInject = async (e) => {
+    e.preventDefault();
     setLoading(true); setStatus(null);
     try {
       const msg = data.message || `${data.type} detected on ${data.component}`;
@@ -18,60 +20,55 @@ export function SignalInjector({ onSent }) {
       }
       setStatus({ type: 'success', text: `✓ Injected ${data.count} signal${data.count > 1 ? 's' : ''} successfully.` });
       onSent?.();
-    } catch (e) {
-      setStatus({ type: 'error', text: '✗ ' + (e.response?.data?.detail || 'Injection failed.') });
+    } catch (err) {
+      setStatus({ type: 'error', text: '✗ ' + errorMessage(err, 'Injection failed.') });
     } finally { setLoading(false); }
   };
 
   return (
-    <div className="glass" style={{ width: '100%', maxWidth: 520, padding: 28, borderRadius: 20 }}>
-      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Signal Injector</h2>
-      <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 24 }}>Simulate infrastructure events</p>
+    <form className="glass injector" onSubmit={handleInject}>
+      <h2>Signal Injector</h2>
+      <p className="injector-sub">Simulate infrastructure events</p>
 
-      <div style={{ padding: '12px 16px', background: 'var(--p2-bg)', borderLeft: '3px solid var(--warning)', borderRadius: '0 4px 4px 0', marginBottom: 24 }}>
-        <p style={{ fontSize: 12, color: 'var(--warning)' }}>Admin/SRE only. Sends real signals to the ingestion pipeline.</p>
-      </div>
+      <div className="note-warn"><p>Admin/SRE only. Sends real signals to the ingestion pipeline.</p></div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <div>
-            <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Component</label>
-            <select value={data.component} onChange={e => setData({ ...data, component: e.target.value })}>
-              {COMPONENTS.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Signal Type</label>
-            <select value={data.type} onChange={e => setData({ ...data, type: e.target.value })}>
-              {SIGNAL_TYPES.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
+      <div className="injector-fields">
+        <div className="injector-pair">
+          <Field label="Component">
+            {id => (
+              <select id={id} value={data.component} onChange={e => setData({ ...data, component: e.target.value })}>
+                {COMPONENTS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
+          </Field>
+          <Field label="Signal Type">
+            {id => (
+              <select id={id} value={data.type} onChange={e => setData({ ...data, type: e.target.value })}>
+                {SIGNAL_TYPES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            )}
+          </Field>
+        </div>
+
+        <Field label="Message (optional)">
+          {id => <input id={id} placeholder={`${data.type} on ${data.component}`} value={data.message} onChange={e => setData({ ...data, message: e.target.value })} />}
+        </Field>
+
+        <div role="group" aria-labelledby="batch-count-label">
+          <span className="field-label" id="batch-count-label">Batch Count</span>
+          <div className="stepper">
+            <button type="button" className="step-btn" aria-label="Decrease count" onClick={() => setData({ ...data, count: Math.max(1, data.count - 1) })}>−</button>
+            <span className="step-value" aria-live="polite">{data.count}</span>
+            <button type="button" className="step-btn" aria-label="Increase count" onClick={() => setData({ ...data, count: Math.min(100, data.count + 1) })}>+</button>
           </div>
         </div>
 
-        <div>
-          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Message (optional)</label>
-          <input placeholder={`${data.type} on ${data.component}`} value={data.message} onChange={e => setData({ ...data, message: e.target.value })} />
-        </div>
-
-        <div>
-          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Batch Count</label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button onClick={() => setData({ ...data, count: Math.max(1, data.count - 1) })} style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--bg-raised)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', fontSize: 18 }}>−</button>
-            <span style={{ fontSize: 16, fontWeight: 700, minWidth: 30, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{data.count}</span>
-            <button onClick={() => setData({ ...data, count: Math.min(100, data.count + 1) })} style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--bg-raised)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', fontSize: 18 }}>+</button>
-          </div>
-        </div>
-
-        <button onClick={handleInject} disabled={loading} className="btn btn-primary" style={{ height: 44, marginTop: 12, fontFamily: "'Plus Jakarta Sans', sans-serif", fontWeight: 600, fontSize: 14 }}>
+        <button type="submit" disabled={loading} className="btn btn-primary inject-submit">
           {loading ? <span className="spinner" /> : `Inject ${data.count > 1 ? data.count + ' Signals' : 'Signal'}`}
         </button>
 
-        {status && (
-          <div style={{ padding: 12, borderRadius: 10, fontSize: 13, textAlign: 'center', border: `1px solid ${status.type === 'success' ? 'rgba(52,211,153,0.25)' : 'rgba(248,113,113,0.25)'}`, background: status.type === 'success' ? 'var(--p3-bg)' : 'var(--p0-bg)', color: status.type === 'success' ? 'var(--success)' : 'var(--error)', animation: 'slideDown 0.2s' }}>
-            {status.text}
-          </div>
-        )}
+        {status && <div className="inject-status" data-status={status.type}>{status.text}</div>}
       </div>
-    </div>
+    </form>
   );
 }

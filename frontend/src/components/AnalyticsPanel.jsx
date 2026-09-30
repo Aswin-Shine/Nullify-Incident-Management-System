@@ -1,404 +1,120 @@
-import React, { useState, useEffect } from "react";
-import {
-  fetchMTTR,
-  fetchSLA,
-  fetchTimeseries,
-  fetchWorkItems,
-} from "../api/client";
+import { fetchMTTR, fetchSLA, fetchTimeseries, errorMessage } from '../api/client';
+import { useQuery } from '../hooks/useQuery';
+import { fmtMTTR } from '../format';
+import { ErrorNote } from './ErrorNote';
 
-function fmtMTTR(s) {
-  if (!s) return "—";
-  if (s < 60) return `${Math.round(s)}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
+const Card = ({ children, className = '' }) => (
+  <div className={`glass card ${className}`}>{children}</div>
+);
+
+const orDash = (s) => fmtMTTR(s) ?? '-';
 
 export function AnalyticsPanel() {
-  const [mttr, setMttr] = useState([]);
-  const [sla, setSla] = useState(null);
-  const [ts, setTs] = useState([]);
-  const [workItems, setWorkItems] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const mttrQ = useQuery('mttr', fetchMTTR);
+  const slaQ = useQuery('sla', fetchSLA);
+  const tsQ = useQuery('ts', fetchTimeseries);
+  const mttr = mttrQ.data ?? [];
+  const sla = slaQ.data;
+  const ts = tsQ.data ?? [];
+  const failure = mttrQ.error || slaQ.error || tsQ.error;
 
-  useEffect(() => {
-    Promise.all([fetchMTTR(), fetchSLA(), fetchTimeseries(), fetchWorkItems()])
-      .then(([m, s, t, wi]) => {
-        setMttr(m);
-        setSla(s);
-        setTs(t);
-        setWorkItems(wi);
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
+  if (mttrQ.loading || slaQ.loading || tsQ.loading) {
+    return (
+      <div className="bento-grid">
+        {[...Array(8)].map((_, i) => <div key={i} className="shimmer card-skeleton" />)}
+      </div>
+    );
+  }
 
-  const breachPct = sla
-    ? Math.round((sla.breached / (sla.total || 1)) * 100)
-    : 0;
-  const breachCol =
-    breachPct < 10
-      ? "var(--success)"
-      : breachPct < 30
-        ? "var(--warning)"
-        : "var(--error)";
+  const breachPct = sla ? Math.round((sla.breached / (sla.total || 1)) * 100) : 0;
+  const breachTone = breachPct < 10 ? 'success' : breachPct < 30 ? 'warning' : 'error';
   const maxMTTR = Math.max(...mttr.map((m) => m.avg_mttr_seconds || 0), 1);
   const maxTS = Math.max(...ts.map((t) => t.signal_count || 0), 1);
   const totalSigs = ts.reduce((a, t) => a + (t.signal_count || 0), 0);
   const topComps = [...mttr]
     .sort((a, b) => (b.avg_mttr_seconds || 0) - (a.avg_mttr_seconds || 0))
     .slice(0, 6);
-  const openItems = workItems.filter(
-    (i) => !["RESOLVED", "CLOSED"].includes(i.status),
-  );
-  const pCounts = { P0: 0, P1: 0, P2: 0, P3: 0 };
-  openItems.forEach((i) => {
-    if (pCounts[i.priority] !== undefined) pCounts[i.priority]++;
-  });
+  const pCounts = { P0: 0, P1: 0, P2: 0, P3: 0, ...sla?.open_by_priority };
   const avgMTTR = mttr.length
     ? mttr.reduce((a, m) => a + (m.avg_mttr_seconds || 0), 0) / mttr.length
     : 0;
 
-  const Card = ({ children, className = "", style = {} }) => (
-    <div
-      className={`glass ${className}`}
-      style={{ borderRadius: 20, padding: 24, ...style }}
-    >
-      {children}
-    </div>
-  );
-
-  if (loading)
-    return (
-      <div className="bento-grid" style={{ overflowY: "auto", flex: 1 }}>
-        {[...Array(8)].map((_, i) => (
-          <div
-            key={i}
-            className="shimmer"
-            style={{ height: 120, borderRadius: 20 }}
-          />
-        ))}
-      </div>
-    );
-
   return (
-    <div
-      className="bento-grid"
-      style={{ overflowY: "auto", flex: 1, alignContent: "start" }}
-    >
-      {/* MTTR by Component — tall + wide */}
+    <div className="bento-grid">
+      {failure && <div className="bento-full"><ErrorNote>{errorMessage(failure, 'Could not load analytics')}</ErrorNote></div>}
+
       <Card className="bento-tall bento-wide">
-        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
-          MTTR by Component
-        </h3>
+        <h3 className="card-title">MTTR by Component</h3>
         {topComps.length === 0 ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              height: 160,
-              fontSize: 32,
-              opacity: 0.2,
-            }}
-          >
-            ∅
-          </div>
+          <div className="chart-empty">∅</div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="mttr-rows">
             {topComps.map((c) => (
-              <div
-                key={c.component_id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "120px 1fr 60px",
-                  alignItems: "center",
-                  gap: 12,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: "var(--text-secondary)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {c.component_id}
-                </span>
-                <div
-                  style={{
-                    height: 8,
-                    background: "var(--bg-raised)",
-                    borderRadius: 4,
-                    overflow: "hidden",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: `${((c.avg_mttr_seconds || 0) / maxMTTR) * 100}%`,
-                      height: "100%",
-                      background: "var(--accent)",
-                      opacity: 0.7,
-                      borderRadius: 4,
-                      transition: "width 0.8s cubic-bezier(0.4,0,0.2,1)",
-                    }}
-                  />
+              <div key={c.component} className="mttr-row">
+                <span className="mttr-name">{c.component}</span>
+                <div className="bar-track">
+                  <div className="bar-fill" style={{ width: `${((c.avg_mttr_seconds || 0) / maxMTTR) * 100}%` }} />
                 </div>
-                <span
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    textAlign: "right",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {fmtMTTR(c.avg_mttr_seconds)}
-                </span>
+                <span className="mttr-value">{orDash(c.avg_mttr_seconds)}</span>
               </div>
             ))}
           </div>
         )}
       </Card>
 
-      {/* SLA Breach Rate */}
-      <Card style={{ textAlign: "center" }}>
-        <h3
-          style={{
-            fontSize: 13,
-            color: "var(--text-secondary)",
-            fontWeight: 500,
-            marginBottom: 12,
-          }}
-        >
-          SLA Breach Rate
-        </h3>
-        <div
-          style={{
-            position: "relative",
-            width: 80,
-            height: 80,
-            margin: "0 auto 16px",
-          }}
-        >
-          <div
-            style={{
-              width: "100%",
-              height: "100%",
-              borderRadius: "50%",
-              background: `conic-gradient(${breachCol} ${breachPct}%, var(--bg-raised) 0)`,
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              top: "12%",
-              left: "12%",
-              width: "76%",
-              height: "76%",
-              borderRadius: "50%",
-              background: "var(--bg-surface)",
-            }}
-          />
-        </div>
-        <div style={{ fontSize: 28, fontWeight: 800, color: breachCol }}>
-          {breachPct}%
-        </div>
-        <p style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-          of incidents breached SLA
-        </p>
+      <Card className="card-center">
+        <h3 className="card-label">SLA Breach Rate</h3>
+        <div className="donut" data-tone={breachTone} style={{ '--pct': `${breachPct}%` }} />
+        <div className="big-number" data-tone={breachTone}>{breachPct}%</div>
+        <p className="muted-sm">of incidents breached SLA</p>
       </Card>
 
-      {/* Total Incidents */}
       <Card>
-        <h3
-          style={{
-            fontSize: 13,
-            color: "var(--text-secondary)",
-            fontWeight: 500,
-            marginBottom: 12,
-          }}
-        >
-          Total Incidents
-        </h3>
-        <div
-          style={{
-            fontSize: 28,
-            fontWeight: 800,
-            marginBottom: 16,
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {sla?.total ?? "—"}
-        </div>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-          {Object.entries(pCounts).map(([p, n]) => {
-            const cols = {
-              P0: "var(--p0-color)",
-              P1: "var(--p1-color)",
-              P2: "var(--p2-color)",
-              P3: "var(--p3-color)",
-            };
-            const bgs = {
-              P0: "var(--p0-bg)",
-              P1: "var(--p1-bg)",
-              P2: "var(--p2-bg)",
-              P3: "var(--p3-bg)",
-            };
-            return (
-              <span
-                key={p}
-                style={{
-                  fontSize: 10,
-                  padding: "2px 6px",
-                  background: bgs[p],
-                  color: cols[p],
-                  borderRadius: 4,
-                  fontWeight: 600,
-                }}
-              >
-                {p}: {n}
-              </span>
-            );
-          })}
+        <h3 className="card-label">Total Incidents</h3>
+        <div className="big-number plain">{sla?.total ?? '-'}</div>
+        <div className="tags">
+          {Object.entries(pCounts).map(([p, n]) => (
+            <span key={p} className="tag" data-level={p.toLowerCase()}>{p}: {n}</span>
+          ))}
         </div>
       </Card>
 
-      {/* Signal Volume — full width */}
       <Card className="bento-full">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: 24,
-          }}
-        >
-          <h3 style={{ fontSize: 16, fontWeight: 700 }}>Signal Volume</h3>
-          <span
-            style={{
-              fontSize: 13,
-              color: "var(--text-secondary)",
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {totalSigs.toLocaleString()} total
-          </span>
+        <div className="card-head">
+          <h3 className="card-title">Signal Volume</h3>
+          <span className="card-aside">{totalSigs.toLocaleString()} total</span>
         </div>
         {ts.length === 0 ? (
-          <div
-            style={{
-              height: 100,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--text-tertiary)",
-              fontSize: 13,
-            }}
-          >
-            No data
-          </div>
+          <div className="chart-none">No data</div>
         ) : (
           <>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-end",
-                gap: 3,
-                height: 100,
-              }}
-            >
+            <div className="bars">
               {ts.map((t, i) => (
-                <div
-                  key={i}
-                  title={`${t.bucket}: ${t.signal_count}`}
-                  style={{
-                    flex: 1,
-                    height: `${Math.max(4, ((t.signal_count || 0) / maxTS) * 100)}%`,
-                    background: "var(--accent)",
-                    opacity: 0.5,
-                    borderRadius: "2px 2px 0 0",
-                    transition: "opacity 0.2s",
-                    cursor: "default",
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.9")}
-                  onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.5")}
-                />
+                <div key={i} className="bar" title={`${t.bucket}: ${t.signal_count}`}
+                  style={{ height: `${Math.max(4, ((t.signal_count || 0) / maxTS) * 100)}%` }} />
               ))}
             </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginTop: 8,
-              }}
-            >
-              {[ts[0], ts[Math.floor(ts.length / 2)], ts[ts.length - 1]]
-                .filter(Boolean)
-                .map((t, i) => (
-                  <span
-                    key={i}
-                    style={{ fontSize: 10, color: "var(--text-tertiary)" }}
-                  >
-                    {t.bucket}
-                  </span>
-                ))}
+            <div className="bar-axis">
+              {[ts[0], ts[Math.floor(ts.length / 2)], ts[ts.length - 1]].filter(Boolean).map((t, i) => (
+                <span key={i}>{t.bucket}</span>
+              ))}
             </div>
           </>
         )}
       </Card>
 
-      {/* Bottom stats row */}
       {[
-        { label: "Avg MTTR", value: fmtMTTR(avgMTTR), color: "var(--info)" },
-        {
-          label: "Open P0s",
-          value: pCounts.P0 ?? 0,
-          color: pCounts.P0 > 0 ? "var(--error)" : "var(--success)",
-        },
-        {
-          label: "Open P1s",
-          value: pCounts.P1 ?? 0,
-          color: pCounts.P1 > 0 ? "var(--warning)" : "var(--success)",
-        },
-        { label: "Breach Rate", value: `${breachPct}%`, color: breachCol },
+        { label: 'Avg MTTR', value: orDash(avgMTTR), tone: 'info' },
+        { label: 'Open P0s', value: pCounts.P0, tone: pCounts.P0 > 0 ? 'error' : 'success' },
+        { label: 'Open P1s', value: pCounts.P1, tone: pCounts.P1 > 0 ? 'warning' : 'success' },
+        { label: 'Breach Rate', value: `${breachPct}%`, tone: breachTone },
       ].map((s) => (
-        <Card key={s.label} style={{ padding: 20 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 8,
-            }}
-          >
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: s.color,
-              }}
-            />
-            <span
-              style={{
-                fontSize: 11,
-                color: "var(--text-tertiary)",
-                textTransform: "uppercase",
-                letterSpacing: "0.04em",
-              }}
-            >
-              {s.label}
-            </span>
+        <Card key={s.label} className="card-sm">
+          <div className="stat-head" data-tone={s.tone}>
+            <div className="stat-dot" />
+            <span>{s.label}</span>
           </div>
-          <div
-            style={{
-              fontSize: 24,
-              fontWeight: 800,
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {s.value}
-          </div>
+          <div className="stat-value">{s.value}</div>
         </Card>
       ))}
     </div>

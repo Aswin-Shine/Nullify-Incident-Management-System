@@ -45,6 +45,14 @@ api.interceptors.response.use(undefined, async (error) => {
   return api(config);
 });
 
+// One readable string from a FastAPI error: a string detail, a 422 list of {msg}, or no response at all.
+export function errorMessage(e, fallback = 'Request failed') {
+  const detail = e?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map(d => d.msg ?? String(d)).join('; ') || fallback;
+  return fallback;
+}
+
 // Auth
 export const login = (d) => api.post('/api/auth/login', d).then(r => { accessToken = r.data.access_token; return r.data; });
 export const logout = () => api.post('/api/auth/logout', null, { headers: CSRF }).finally(() => { accessToken = null; });
