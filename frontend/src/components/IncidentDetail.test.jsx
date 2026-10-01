@@ -1,4 +1,4 @@
-import { screen, act, waitFor } from '@testing-library/react'
+import { screen, act, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { IncidentDetail } from './IncidentDetail'
 import * as api from '../api/client'
@@ -89,4 +89,39 @@ test('the RCA is fetched once per incident (F-30)', async () => {
   await screen.findByText('Root Cause Analysis')
   await settle()
   expect(api.fetchRCA).toHaveBeenCalledTimes(1)
+})
+
+test('the assignee select has a name so browsers and password managers can identify it', async () => {
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect(await screen.findByRole('combobox', { name: 'Assign to' })).toHaveProperty('name', 'assignee')
+})
+
+test('an SRE sees the select preselected to the current assignee, and can unassign', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ assignee_id: 'u2', assignee_username: 'bob' }))
+  api.assignWorkItem.mockResolvedValue(workItem())
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  const select = await screen.findByRole('combobox', { name: 'Assign to' })
+  await waitFor(() => expect(select.value).toBe('u2'))
+  await userEvent.selectOptions(select, 'Unassigned')
+  expect(api.assignWorkItem).toHaveBeenCalledWith('wi-1', null)
+})
+
+test('viewer-role users are not offered as assignees', async () => {
+  api.listUsers.mockResolvedValue([
+    { id: 'u2', username: 'bob', role: 'sre' },
+    { id: 'u3', username: 'carol', role: 'viewer' },
+    { id: 'u4', username: 'root', role: 'admin' },
+  ])
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  const select = await screen.findByRole('combobox', { name: 'Assign to' })
+  await waitFor(() => expect(within(select).getByText(/bob/)).toBeTruthy())
+  expect(within(select).queryByText(/carol/)).toBeNull()
+  expect(within(select).getByText(/root/)).toBeTruthy()
+})
+
+test('a viewer still sees the assignee as text, not a select', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ assignee_id: 'u2', assignee_username: 'bob' }))
+  await renderAs('viewer', <IncidentDetail id="wi-1" />)
+  expect(await screen.findByText('bob')).toBeTruthy()
+  expect(screen.queryByRole('combobox', { name: 'Assign to' })).toBeNull()
 })

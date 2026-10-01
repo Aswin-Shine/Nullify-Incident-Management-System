@@ -32,10 +32,10 @@ export function LoginPage() {
 
         <form className="login-form" onSubmit={handleSubmit}>
           <Field label="Username">
-            {id => <input id={id} type="text" autoComplete="username" value={formData.username} onChange={e => setFormData({ ...formData, username: e.target.value })} placeholder="Enter username" />}
+            {id => <input id={id} name="username" type="text" autoComplete="username" value={formData.username} onChange={e => setFormData({ ...formData, username: e.target.value })} placeholder="Enter username" />}
           </Field>
           <Field label="Password">
-            {id => <input id={id} type="password" autoComplete="current-password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} placeholder="••••••••" />}
+            {id => <input id={id} name="password" type="password" autoComplete="current-password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} placeholder="••••••••" />}
           </Field>
 
           {error && <ErrorNote>{error}</ErrorNote>}

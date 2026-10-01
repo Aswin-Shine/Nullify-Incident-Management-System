@@ -54,6 +54,7 @@ export function CommentsSection({ wiId, refreshTick }) {
 
       <form className="composer" onSubmit={post}>
         <textarea
+          name="comment"
           aria-label="Add a comment"
           placeholder="Add a comment… (Ctrl+Enter to post)"
           value={text}

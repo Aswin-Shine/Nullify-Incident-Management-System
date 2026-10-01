@@ -7,14 +7,21 @@ import { PriorityBadge, StatusBadge } from './Badges';
 import { ErrorNote } from './ErrorNote';
 
 const FILTERS = ['ALL', 'OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'];
+const PAGE = 100;
+const MAX_LIMIT = 500;  // ponytail: past this, narrow with the status pills; API clients can walk next_cursor
+
+// "Critical" means a P0 someone still has to act on.
+const isCritical = i => i.priority === 'P0' && ['OPEN', 'INVESTIGATING'].includes(i.status);
 
 export function IncidentList({ onSelect, selectedId, refreshTick }) {
   const [filter, setFilter] = useState('ALL');
+  const [limit, setLimit] = useState(PAGE);
+  // Keyed by filter only, so asking for more rows keeps the current ones on screen while it loads.
   const { data, error, loading } = useQuery(
-    filter, () => fetchWorkItems(filter === 'ALL' ? undefined : filter), refreshTick);
-  const incidents = data ?? [];
+    filter, () => fetchWorkItems(filter === 'ALL' ? undefined : filter, limit), `${refreshTick}:${limit}`);
+  const incidents = data?.items ?? [];
 
-  const p0Count = incidents.filter(i => i.priority === 'P0' && i.status !== 'CLOSED').length;
+  const p0Count = incidents.filter(isCritical).length;
 
   return (
     <div className="glass incident-list">
@@ -28,7 +35,7 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
 
       <div className="pills">
         {FILTERS.map(f => (
-          <button type="button" key={f} className="pill" aria-pressed={filter === f} onClick={() => setFilter(f)}>
+          <button type="button" key={f} className="pill" aria-pressed={filter === f} onClick={() => { setFilter(f); setLimit(PAGE); }}>
             {f}
           </button>
         ))}
@@ -45,7 +52,7 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
         ) : incidents.map(incident => (
           <button type="button" key={incident.id} className="btn-bare incident-row"
             data-selected={incident.id === selectedId}
-            data-p0={incident.priority === 'P0' && incident.status !== 'CLOSED'}
+            data-p0={isCritical(incident)}
             onClick={() => onSelect(incident.id)}>
             <span className="row-top">
               <span className="row-main">
@@ -67,6 +74,11 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
             </span>
           </button>
         ))}
+        {data?.next_cursor && limit < MAX_LIMIT && (
+          <button type="button" className="pill load-more" onClick={() => setLimit(l => Math.min(l + PAGE, MAX_LIMIT))}>
+            Load more
+          </button>
+        )}
       </div>
     </div>
   );

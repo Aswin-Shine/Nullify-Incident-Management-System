@@ -61,8 +61,9 @@ export const rotateApiKey = () => api.post('/api/auth/api-key').then(r => r.data
 export const listUsers = () => api.get('/api/auth/users').then(r => r.data);
 
 // Work items
-export const fetchWorkItems = (status) =>
-  api.get('/api/work-items', { params: status ? { status } : {} }).then(r => r.data);
+// One page of incidents: { items, next_cursor }. The UI grows `limit` instead of walking cursors.
+export const fetchWorkItems = (status, limit) =>
+  api.get('/api/work-items', { params: { ...(status && { status }), ...(limit && { limit }) } }).then(r => r.data);
 export const fetchWorkItem = (id) => api.get(`/api/work-items/${id}`).then(r => r.data);
 export const fetchSignals = (id) => api.get(`/api/work-items/${id}/signals`).then(r => r.data);
 export const fetchRCA = (id) => api.get(`/api/work-items/${id}/rca`).then(r => r.data).catch(() => null);
@@ -86,3 +87,10 @@ export const fetchHealth = () => api.get('/health', { validateStatus: s => s < 6
 export const fetchTimeseries = () => api.get('/api/timeseries', { params: { limit: 20 } }).then(r => r.data);
 export const fetchMTTR = () => api.get('/api/work-items/analytics/mttr').then(r => r.data);
 export const fetchSLA = () => api.get('/api/work-items/analytics/sla').then(r => r.data);
+// Own account and admin screen
+export const changePassword = (current_password, new_password) =>
+  api.post('/api/auth/password', { current_password, new_password })
+    .then(r => { accessToken = r.data.access_token; return r.data; });
+export const listAccounts = () => api.get('/api/auth/accounts').then(r => r.data);
+export const createUser = (data) => api.post('/api/auth/users', data).then(r => r.data);
+export const updateUser = (id, data) => api.patch(`/api/auth/users/${id}`, data).then(r => r.data);

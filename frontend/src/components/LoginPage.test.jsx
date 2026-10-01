@@ -43,3 +43,9 @@ test('a network failure shows the fallback message', async () => {
   await userEvent.type(screen.getByLabelText('Password'), 'x{Enter}')
   expect(await screen.findByText('Authentication failed')).toBeTruthy()
 })
+
+test('inputs have names so password managers can fill them', () => {
+  setup()
+  expect(screen.getByLabelText('Username').getAttribute('name')).toBe('username')
+  expect(screen.getByLabelText('Password').getAttribute('name')).toBe('password')
+})

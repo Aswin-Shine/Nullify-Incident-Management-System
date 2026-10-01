@@ -40,3 +40,9 @@ test('Ctrl+Enter posts', async () => {
   await userEvent.type(await screen.findByRole('textbox'), 'hello{Control>}{Enter}{/Control}')
   expect(api.addComment).toHaveBeenCalledWith('wi-1', 'hello')
 })
+
+test('the comment textarea has a name', async () => {
+  api.fetchComments.mockResolvedValue([])
+  render(<CommentsSection wiId="wi-1" />)
+  expect((await screen.findByLabelText(/comment/i)).getAttribute('name')).toBe('comment')
+})

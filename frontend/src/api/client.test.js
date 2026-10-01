@@ -58,3 +58,18 @@ test('errorMessage turns string, array and missing details into one string', asy
   expect(client.errorMessage({ response: { data: { detail: [{ msg: 'a' }, { msg: 'b' }] } } })).toBe('a; b')
   expect(client.errorMessage(new Error('Network Error'), 'Failed')).toBe('Failed')
 })
+
+test('changePassword stores the returned access token for the next request', async () => {
+  const { client } = await load()
+  const headers = []
+  client.api.defaults.adapter = async (config) => {
+    headers.push(String(config.headers.Authorization))
+    const reply = (data) => ({ data, status: 200, statusText: '', headers: {}, config })
+    return config.url.endsWith('/password') ? reply({ access_token: 'fresh', user: {} }) : reply({ ok: true })
+  }
+  const data = await client.changePassword('old-password-123', 'a-brand-new-passphrase')
+  expect(data.access_token).toBe('fresh')
+  expect(client.getAccessToken()).toBe('fresh')
+  await client.api.get('/api/auth/me')
+  expect(headers.at(-1)).toBe('Bearer fresh')
+})

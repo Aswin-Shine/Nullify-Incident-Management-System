@@ -76,6 +76,8 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
   const mttr = fmtMTTR(incident.mttr_seconds);
   const transitions = write ? NEXT[incident.status] || [] : [];
   const signalList = signals.data ?? [];
+  // Viewers cannot act on an incident, so only SREs and admins are offered.
+  const assignable = (users.data ?? []).filter(u => u.role !== 'viewer');
 
   return (
     <div className="detail">
@@ -95,19 +97,22 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
         </p>
 
         <div className="assignee">
-          {incident.assignee_username ? (
-            <>
-              <div className="avatar avatar-lg" style={{ background: avatarColor(incident.assignee_username) }}>
-                {incident.assignee_username[0].toUpperCase()}
-              </div>
-              <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
-            </>
-          ) : write ? (
-            <select aria-label="Assign to" className="assign-select" defaultValue=""
-              onChange={e => { if (e.target.value) mutate(() => assignWorkItem(id, e.target.value)); }}>
-              <option value="" disabled>Unassigned, assign to…</option>
-              {(users.data ?? []).map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
+          {incident.assignee_username && (
+            <div className="avatar avatar-lg" style={{ background: avatarColor(incident.assignee_username) }}>
+              {incident.assignee_username[0].toUpperCase()}
+            </div>
+          )}
+          {write ? (
+            <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''}
+              onChange={e => mutate(() => assignWorkItem(id, e.target.value || null))}>
+              <option value="">Unassigned</option>
+              {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
+                <option value={incident.assignee_id}>{incident.assignee_username}</option>
+              )}
+              {assignable.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
             </select>
+          ) : incident.assignee_username ? (
+            <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
           ) : (
             <span className="assignee-text">Unassigned</span>
           )}

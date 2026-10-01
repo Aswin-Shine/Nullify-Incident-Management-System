@@ -7,6 +7,8 @@ import { IncidentDetail } from './components/IncidentDetail';
 import { HealthBar } from './components/HealthBar';
 import { SignalInjector } from './components/SignalInjector';
 import { AnalyticsPanel } from './components/AnalyticsPanel';
+import { AccountPanel } from './components/AccountPanel';
+import { UsersPanel } from './components/UsersPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useCoalesced } from './hooks/useCoalesced';
@@ -32,7 +34,7 @@ function Dashboard() {
     setLiveEvents(ev => [label, ...ev].slice(0, 5));
   });
 
-  const tabs = ['incidents', 'analytics', ...(canWrite(user) ? ['inject'] : [])];
+  const tabs = ['incidents', 'analytics', ...(canWrite(user) ? ['inject'] : []), 'account', ...(user?.role === 'admin' ? ['users'] : [])];
 
   return (
     <div className="app">
@@ -89,6 +91,20 @@ function Dashboard() {
         {activeTab === 'inject' && (
           <div className="center-pane">
             <SignalInjector onSent={refresh} />
+          </div>
+        )}
+        {activeTab === 'account' && (
+          <div className="pane">
+            <ErrorBoundary>
+              <AccountPanel />
+            </ErrorBoundary>
+          </div>
+        )}
+        {activeTab === 'users' && (
+          <div className="pane">
+            <ErrorBoundary>
+              <UsersPanel />
+            </ErrorBoundary>
           </div>
         )}
       </main>
