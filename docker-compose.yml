@@ -48,6 +48,7 @@ services:
 
   # ── Backend (FastAPI) ──────────────────────────────────────
   backend:
+    build: ./backend          # `docker compose up --build` builds this repo; `docker compose pull` fetches the registry image
     image: aswinshine/nullify-backend:v1
     container_name: nullify-backend
     restart: unless-stopped
@@ -104,6 +105,7 @@ services:
   # Runs alembic upgrade head before backend starts
   # Use: docker compose run --rm migrate
   migrate:
+    build: ./backend
     image: aswinshine/nullify-backend:v1
     container_name: nullify-migrate
     command: ["alembic", "upgrade", "head"]
@@ -128,6 +130,7 @@ services:
 
   # ── Frontend (React → nginx) ───────────────────────────────
   frontend:
+    build: ./frontend
     image: aswinshine/nullify-frontend:v1
     container_name: nullify-frontend
     restart: unless-stopped
@@ -139,7 +142,7 @@ services:
     networks:
       - nullify-internal
     healthcheck:
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost/"]  # nginx itself, not backend readiness
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]  # nginx itself, not backend readiness; localhost resolves to ::1 and nginx listens on IPv4 only
       interval: 30s
       timeout: 5s
       retries: 3
