@@ -18,11 +18,15 @@ router = APIRouter(prefix="/api/work-items", tags=["work-items"])
 @router.get("")
 async def list_work_items(
     status: str | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
     _: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    items = await work_item_service.list_work_items(db, status)
-    return [i.model_dump(mode="json") for i in items]
+    try:
+        return await work_item_service.list_work_items(db, status, limit, cursor)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @router.get("/analytics/mttr")

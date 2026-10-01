@@ -1,8 +1,9 @@
-"""Webhook notifications — Slack + PagerDuty."""
+"""Webhook notifications: Slack + PagerDuty."""
 from __future__ import annotations
 import logging
 import httpx
 from app.core.config import get_settings
+from app.services.alert_strategy import get_alert_strategy
 
 logger = logging.getLogger("ims.webhooks")
 settings = get_settings()
@@ -11,17 +12,24 @@ PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
 PAGERDUTY_SEVERITY = {"P0": "critical", "P1": "error", "P2": "warning", "P3": "info"}
 
 
+def _channels(work_item: dict) -> tuple[str, ...]:
+    return get_alert_strategy(work_item.get("component", ""), work_item.get("component_type")).channels
+
+
 async def notify_incident_created(work_item: dict):
-    """Fire both Slack + PagerDuty on new P0/P1 incidents."""
-    priority = work_item.get("priority", "P3")
-    if priority in ("P0", "P1"):
+    """Notify the channels the component's alert strategy declares (PagerDuty pages P0/P1 only)."""
+    channels = _channels(work_item)
+    if "pagerduty" in channels:
         await _pagerduty_trigger(work_item)
-    await _slack_notify(work_item, event="created")
+    if "slack" in channels:
+        await _slack_notify(work_item, event="created")
 
 
 async def notify_status_change(work_item: dict, new_status: str):
-    await _slack_notify(work_item, event="status_change", extra={"new_status": new_status})
-    if new_status == "RESOLVED" and work_item.get("priority") in ("P0", "P1"):
+    channels = _channels(work_item)
+    if "slack" in channels:
+        await _slack_notify(work_item, event="status_change", extra={"new_status": new_status})
+    if new_status == "RESOLVED" and "pagerduty" in channels:
         await _pagerduty_resolve(work_item)
 
 
@@ -33,7 +41,7 @@ async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
     wi_id = work_item.get("id", "")[:8]
 
     if event == "created":
-        text = f"{emoji} *New Incident* [{priority}] `{wi_id}` — {work_item.get('title')}"
+        text = f"{emoji} *New Incident* [{priority}] `{wi_id}` - {work_item.get('title')}"
         color = "#FF3B3B" if priority == "P0" else "#FF8C00" if priority == "P1" else "#F5C518"
     else:
         new_status = extra.get("new_status", "") if extra else ""

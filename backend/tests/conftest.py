@@ -39,14 +39,6 @@ END $$;
 
 
 @pytest.fixture(scope="session")
-def event_loop():
-    # One loop for the whole run: the app's asyncpg pool is bound to the loop that created it.
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
 def test_database():
     """Drop, recreate and migrate the test database once per run."""
     s = get_settings()

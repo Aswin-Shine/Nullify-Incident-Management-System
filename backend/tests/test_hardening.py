@@ -94,3 +94,40 @@ async def test_cors_allows_only_configured_origins(client):
 
     assert ok.headers.get("access-control-allow-origin") == allowed
     assert "access-control-allow-origin" not in evil.headers
+
+
+def test_db_pool_fits_under_postgres_max_connections_across_workers():
+    """B-19: 30 connections per process x 4 uvicorn workers exceeded Postgres's default 100."""
+    from app.db.postgres import engine
+
+    s = Settings()
+    assert (s.db_pool_size, s.db_max_overflow) == (5, 5)
+    assert (engine.pool.size(), engine.pool._max_overflow) == (s.db_pool_size, s.db_max_overflow)
+    assert 4 * (s.db_pool_size + s.db_max_overflow) < 100
+
+
+@pytest.mark.asyncio
+async def test_lake_writes_for_different_components_do_not_block_each_other():
+    """B-15: one global lock serialised every lake append."""
+    import asyncio
+    from app.db import nosql
+
+    sig = lambda c: {"component_id": c, "signal_type": "ERROR", "message": "x"}  # noqa: E731
+    async with nosql._locks[nosql._path("LAKE_A")]:
+        await asyncio.wait_for(nosql.append_signal(sig("LAKE_B")), 1)  # B is not blocked by A's lock
+
+        same = asyncio.create_task(nosql.append_signal(sig("LAKE_A")))
+        await asyncio.sleep(0.1)
+        assert not same.done()  # the same component still serialises
+    await asyncio.wait_for(same, 1)
+
+
+def test_throughput_line_is_silent_when_idle_and_names_the_process():
+    """B-22: the per-process log printed a zero line every 5 s and did not say which worker it was."""
+    from app.services.ingestion import _throughput_line
+
+    assert _throughput_line(0, 5.0, 0, 50_000) is None
+    line = _throughput_line(100, 5.0, 3, 50_000)
+    assert f"pid={os.getpid()}" in line
+    assert "20.0 sig/sec" in line
+    assert _throughput_line(0, 5.0, 7, 50_000) is not None  # idle workers with a backlog still report

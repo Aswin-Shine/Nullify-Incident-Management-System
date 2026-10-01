@@ -53,25 +53,13 @@ async def delete_val(key: str):
         logger.warning("Cache delete failed [%s]: %s", key, e)
 
 
-async def delete_pattern(pattern: str):
+async def bump(key: str):
+    """Increment a generation counter. Readers put it in their cache keys, so a bump retires every
+    key built from the old value (they expire on their own TTL) without scanning Redis."""
     try:
-        keys = await _r().keys(f"ims:{pattern}")
-        if keys:
-            await _r().delete(*keys)
+        await _r().incr(f"ims:{key}")
     except Exception as e:
-        logger.warning("Cache delete_pattern failed [%s]: %s", pattern, e)
-
-
-async def get_all_with_prefix(prefix: str) -> list[Any]:
-    try:
-        keys = await _r().keys(f"ims:{prefix}*")
-        if not keys:
-            return []
-        vals = await _r().mget(*keys)
-        return [json.loads(v) for v in vals if v]
-    except Exception as e:
-        logger.warning("Cache prefix scan failed [%s]: %s", prefix, e)
-        return []
+        logger.warning("Cache bump failed [%s]: %s", key, e)
 
 
 async def incr(key: str, ttl: int = 60) -> int:

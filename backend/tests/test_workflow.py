@@ -1,15 +1,16 @@
 """Workflow: race-free transitions, MTTR per spec, RCA immutability, side effects after commit."""
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select, update
 
 from app.db.postgres import AsyncSessionLocal, RCARecord, User, WorkItem
+from app.models.schemas import WorkItemCreate
 from app.services.ingestion import process_signal
 from app.services.state_machine import InvalidTransitionError
-from app.services.work_item_service import ConflictError, transition_status
+from app.services.work_item_service import ConflictError, create_work_item, transition_status
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
 
@@ -175,3 +176,123 @@ async def test_assignment_broadcasts_after_commit(client, make_headers):
 
     assert r.status_code == 200
     assert seen == [assignee]
+
+
+async def test_unassign_clears_the_assignee_and_the_cache(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    async with AsyncSessionLocal() as db:
+        assignee = (await db.execute(select(User.id))).scalar_one()
+    await client.patch(f"/api/work-items/{wi_id}/assign", json={"assignee_id": assignee}, headers=headers)
+    assert (await client.get(f"/api/work-items/{wi_id}", headers=headers)).json()["assignee_id"] == assignee
+
+    r = await client.patch(f"/api/work-items/{wi_id}/assign", json={"assignee_id": None}, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["assignee_id"] is None
+    assert (await client.get(f"/api/work-items/{wi_id}", headers=headers)).json()["assignee_id"] is None
+
+
+async def test_sla_stats_open_by_priority_excludes_resolved_and_closed(client, make_headers):
+    headers = await make_headers("sre")
+    async with AsyncSessionLocal() as db:
+        ids = {
+            "open_p0": await create_work_item(WorkItemCreate(component="A1", priority="P0", title="a"), db),
+            "resolved_p0": await create_work_item(WorkItemCreate(component="A2", priority="P0", title="b"), db),
+            "investigating_p1": await create_work_item(WorkItemCreate(component="A3", priority="P1", title="c"), db),
+            "closed_p2": await create_work_item(WorkItemCreate(component="A4", priority="P2", title="d"), db),
+        }
+        await db.commit()
+    await set_status(ids["resolved_p0"], "RESOLVED")
+    await set_status(ids["investigating_p1"], "INVESTIGATING")
+    await set_status(ids["closed_p2"], "CLOSED")
+
+    r = await client.get("/api/work-items/analytics/sla", headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["open_by_priority"] == {"P0": 1, "P1": 1, "P2": 0, "P3": 0}
+
+
+# -- B-18: keyset pagination, B-09: list cache without KEYS ------------------
+
+async def make_items(priorities):
+    """One work item per priority, created in order with distinct created_at."""
+    ids = []
+    async with AsyncSessionLocal() as db:
+        for i, p in enumerate(priorities):
+            ids.append(await create_work_item(WorkItemCreate(component=f"C{i}", priority=p, title=f"t{i}"), db))
+            await db.commit()
+    return ids
+
+
+async def walk(client, headers, **params):
+    """Follow next_cursor to the end. Returns the pages (each a list of ids) and every cursor seen."""
+    pages, cursors, cursor = [], [], None
+    while True:
+        q = {**params, **({"cursor": cursor} if cursor else {})}
+        r = await client.get("/api/work-items", params=q, headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        pages.append([i["id"] for i in body["items"]])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            return pages, cursors
+        cursors.append(cursor)
+
+
+async def test_list_is_paginated_by_keyset_without_overlap_or_gaps(client, make_headers):
+    headers = await make_headers("viewer")
+    ids = await make_items(["P1", "P0", "P2", "P0", "P1"])
+
+    pages, cursors = await walk(client, headers, limit=2)
+
+    assert [len(p) for p in pages] == [2, 2, 1]
+    flat = [i for p in pages for i in p]
+    assert len(set(flat)) == 5 and set(flat) == set(ids)
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(WorkItem.id, WorkItem.priority, WorkItem.created_at))).all()
+    newest_first = sorted(rows, key=lambda r: (r.created_at, r.id), reverse=True)
+    assert flat == [r.id for r in sorted(newest_first, key=lambda r: r.priority)]  # stable: priority, then newest
+    assert all(isinstance(c, str) and c for c in cursors)
+
+
+async def test_limit_is_clamped_and_a_bad_cursor_is_422(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_items(["P0", "P1", "P2"])
+
+    low = await client.get("/api/work-items", params={"limit": 0}, headers=headers)
+    high = await client.get("/api/work-items", params={"limit": 99999}, headers=headers)
+    garbage = await client.get("/api/work-items", params={"cursor": "not-a-cursor"}, headers=headers)
+    bad_json = await client.get("/api/work-items", params={"cursor": "e30"}, headers=headers)  # base64 of {}
+
+    assert len(low.json()["items"]) == 1 and low.json()["next_cursor"] is not None
+    assert high.status_code == 200 and len(high.json()["items"]) == 3 and high.json()["next_cursor"] is None
+    assert garbage.status_code == 422
+    assert bad_json.status_code == 422
+
+
+async def test_status_filter_and_pagination_work_together(client, make_headers):
+    headers = await make_headers("viewer")
+    ids = await make_items(["P0", "P1", "P2", "P3"])
+    await set_status(ids[0], "INVESTIGATING")
+    await set_status(ids[2], "INVESTIGATING")
+    await set_status(ids[3], "INVESTIGATING")
+
+    pages, _ = await walk(client, headers, status="INVESTIGATING", limit=2)
+
+    assert [len(p) for p in pages] == [2, 1]
+    assert {i for p in pages for i in p} == {ids[0], ids[2], ids[3]}
+
+
+async def test_list_cache_is_invalidated_without_scanning_redis_keys(client, make_headers):
+    from app.db import cache
+
+    headers = await make_headers("viewer")
+    assert (await client.get("/api/work-items", headers=headers)).json()["items"] == []  # primes the cache
+    with patch.object(cache._r(), "keys", new_callable=AsyncMock) as keys:
+        wi_id = await process_signal(sig("CACHE_FRESH"))
+        r = await client.get("/api/work-items", headers=headers)
+
+    assert [i["id"] for i in r.json()["items"]] == [wi_id]
+    keys.assert_not_called()
+    assert not hasattr(cache, "delete_pattern") and not hasattr(cache, "get_all_with_prefix")

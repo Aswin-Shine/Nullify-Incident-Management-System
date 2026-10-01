@@ -24,7 +24,7 @@ from app.core.security import (
 )
 from app.db.postgres import get_db, User
 from app.models.schemas import (
-    ApiKeyResponse, LoginRequest, TokenResponse, UserCreate, UserPublic, UserResponse, UserUpdate,
+    ApiKeyResponse, LoginRequest, PasswordChange, TokenResponse, UserCreate, UserPublic, UserResponse, UserUpdate,
 )
 from app.services.user_service import create_account
 
@@ -42,7 +42,8 @@ def _ip(request: Request) -> str:
 
 def _user_resp(u: User) -> UserResponse:
     return UserResponse(id=u.id, username=u.username, email=u.email, role=u.role,
-                        is_active=u.is_active, created_at=u.created_at)
+                        is_active=u.is_active, created_at=u.created_at,
+                        has_api_key=u.api_key_hash is not None)
 
 
 def _claims(u: User) -> dict:
@@ -119,6 +120,21 @@ async def me(user: User = Depends(get_current_active_user)):
     return _user_resp(user)
 
 
+@router.post("/password", response_model=TokenResponse, dependencies=[Depends(auth_limit)])
+async def change_password(data: PasswordChange, response: Response,
+                          user: User = Depends(get_current_active_user), db: AsyncSession = Depends(get_db)):
+    """Change my own password. 400 (not 401) on a wrong current password: a 401 would trigger a refresh."""
+    if not await asyncio.to_thread(verify_password, data.current_password, user.hashed_password):
+        raise HTTPException(400, "Current password is incorrect")
+    if data.new_password == data.current_password:
+        raise HTTPException(400, "New password must differ from the current one")
+    user.hashed_password = await asyncio.to_thread(hash_password, data.new_password)
+    user.token_version += 1  # signs out every other session
+    await db.commit()
+    security_log.info("password_changed user=%s", user.username)
+    return _session(response, user)  # this session continues on a fresh token and cookie
+
+
 @router.post("/api-key", response_model=ApiKeyResponse)
 async def rotate_api_key(user: User = Depends(get_current_active_user), db: AsyncSession = Depends(get_db)):
     """Issue a new API key (the previous one stops working). The key is shown only in this response."""
@@ -141,6 +157,13 @@ async def list_users(_: User = Depends(require_sre_or_admin), db: AsyncSession =
     return [UserPublic(id=u.id, username=u.username, role=u.role) for u in rows]
 
 
+@router.get("/accounts", response_model=list[UserResponse])
+async def list_accounts(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Every account, deactivated ones included, for the admin screen."""
+    rows = (await db.execute(select(User).order_by(User.username))).scalars().all()
+    return [_user_resp(u) for u in rows]
+
+
 @router.post("/users", response_model=UserResponse, status_code=201)
 async def create_user(data: UserCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     try:
@@ -156,6 +179,11 @@ async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(requ
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "User not found")
+    if user.id == admin.id and (
+        (data.role is not None and data.role != user.role)
+        or (data.is_active is not None and data.is_active != user.is_active)
+    ):
+        raise HTTPException(400, "You cannot change your own role or active status")
     if data.role is not None and data.role != user.role:
         security_log.info("role_changed by=%s user=%s from=%s to=%s", admin.username, user.username, user.role, data.role)
         user.role = data.role
@@ -165,5 +193,9 @@ async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(requ
                           admin.username, user.username)
         user.is_active = data.is_active
         user.token_version += 1
+    if data.password is not None:
+        user.hashed_password = await asyncio.to_thread(hash_password, data.password)
+        user.token_version += 1
+        security_log.info("password_reset by=%s user=%s", admin.username, user.username)
     await db.commit()
     return _user_resp(user)

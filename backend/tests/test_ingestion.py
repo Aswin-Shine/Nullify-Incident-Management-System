@@ -158,12 +158,12 @@ async def test_new_incident_visible_in_cached_list_immediately(client, make_head
     """Regression for B-09: ingestion-created incidents never invalidated the list cache."""
     headers = await make_headers("viewer")
     r = await client.get("/api/work-items", headers=headers)
-    assert r.json() == []  # primes the Redis list cache
+    assert r.json()["items"] == []  # primes the Redis list cache
 
     wi_id = await process_signal(sig())
 
     r = await client.get("/api/work-items", headers=headers)
-    assert [w["id"] for w in r.json()] == [wi_id]
+    assert [w["id"] for w in r.json()["items"]] == [wi_id]
 
 
 def _upsert_failing(times, exc):

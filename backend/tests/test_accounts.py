@@ -125,3 +125,75 @@ async def test_security_events_are_logged(client, make_headers, caplog):
     events = " ".join(r.getMessage() for r in caplog.records if r.name == "ims.security")
     for event in ("login_failed", "user_created", "role_changed", "api_key_rotated"):
         assert event in events
+
+
+# ── Admin screen: account list, password reset, self-protection, has_api_key ──
+
+
+async def test_admin_lists_all_accounts_including_inactive(client, make_headers):
+    admin = await make_headers("admin")
+    created = (await client.post("/api/auth/users", json=NEW, headers=admin)).json()
+    await client.patch(f"/api/auth/users/{created['id']}", json={"is_active": False}, headers=admin)
+
+    r = await client.get("/api/auth/accounts", headers=admin)
+
+    assert r.status_code == 200
+    by_name = {u["username"]: u for u in r.json()}
+    assert by_name["new_sre"]["is_active"] is False
+    assert by_name["new_sre"]["email"] == "new.sre@example.com"
+    assert by_name["new_sre"]["has_api_key"] is False
+    assert all(not SECRET_FIELDS & u.keys() for u in r.json())
+
+
+@pytest.mark.parametrize("role", ["sre", "viewer"])
+async def test_only_admin_lists_accounts(client, make_headers, role):
+    assert (await client.get("/api/auth/accounts", headers=await make_headers(role))).status_code == 403
+
+
+async def test_admin_resets_a_password_and_revokes_old_tokens(client, make_headers, caplog):
+    caplog.set_level(logging.INFO, logger="ims.security")
+    admin = await make_headers("admin")
+    await client.post("/api/auth/users", json=NEW, headers=admin)
+    user_headers, user = await login(client, NEW["username"])
+
+    r = await client.patch(f"/api/auth/users/{user['id']}", json={"password": "reset-by-the-admin-1"}, headers=admin)
+
+    assert r.status_code == 200
+    assert (await client.get("/api/auth/me", headers=user_headers)).status_code == 401
+    await login(client, NEW["username"], "reset-by-the-admin-1")
+    assert any("password_reset" in m.getMessage() for m in caplog.records if m.name == "ims.security")
+
+
+async def test_admin_reset_rejects_a_short_password(client, make_headers):
+    admin = await make_headers("admin")
+    created = (await client.post("/api/auth/users", json=NEW, headers=admin)).json()
+
+    r = await client.patch(f"/api/auth/users/{created['id']}", json={"password": "short"}, headers=admin)
+
+    assert r.status_code == 422
+
+
+async def test_admin_cannot_demote_or_deactivate_themselves(client, make_user):
+    """A mis-click must not lock out the last admin."""
+    me = await make_user("admin")
+    other = await make_user("admin")
+    headers, _ = await login(client, me["username"])
+
+    for body in ({"role": "viewer"}, {"is_active": False}):
+        assert (await client.patch(f"/api/auth/users/{me['id']}", json=body, headers=headers)).status_code == 400
+    assert (await client.get("/api/auth/me", headers=headers)).json()["role"] == "admin"
+    # Re-sending the same values is not a change.
+    assert (await client.patch(f"/api/auth/users/{me['id']}", json={"role": "admin"}, headers=headers)).status_code == 200
+    # Another admin can still be changed.
+    assert (await client.patch(f"/api/auth/users/{other['id']}", json={"role": "sre"}, headers=headers)).status_code == 200
+
+
+async def test_has_api_key_flips_after_rotation(client, make_headers):
+    admin = await make_headers("admin")
+    assert (await client.get("/api/auth/me", headers=admin)).json()["has_api_key"] is False
+
+    await client.post("/api/auth/api-key", headers=admin)
+
+    me = (await client.get("/api/auth/me", headers=admin)).json()
+    assert me["has_api_key"] is True
+    assert not SECRET_FIELDS & me.keys()

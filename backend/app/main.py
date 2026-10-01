@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.cache import init_redis, close_redis
 from app.services.ingestion import start_ingestion_workers, stop_ingestion_workers
+from app.services.ws_manager import manager
 from app.middleware.observability import setup_prometheus, setup_otel
 from app.routers import signals, work_items, health, ws, auth
 
@@ -21,11 +22,13 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     logger.info("Starting Nullify backend [env=%s]", settings.app_env)
     await init_redis()  # schema is owned by Alembic: run `alembic upgrade head` before starting
+    await manager.start()  # cross-worker live updates over Redis pub/sub
     await start_ingestion_workers()
     logger.info("Nullify ready")
     yield
     logger.info("Shutting down Nullify: draining ingestion queue")
     await stop_ingestion_workers(settings.shutdown_drain_seconds)
+    await manager.stop()
     await close_redis()
 
 

@@ -28,6 +28,11 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     role: Optional[Role] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = Field(None, min_length=12, max_length=128)  # admin reset
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=12, max_length=128)
 
 class UserResponse(BaseModel):
     id: str
@@ -36,6 +41,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    has_api_key: bool = False  # never the key or its hash
 
 class UserPublic(BaseModel):
     """What SREs need to pick an assignee: never keys, hashes or emails."""
@@ -61,8 +67,11 @@ class ApiKeyResponse(BaseModel):
 MAX_METADATA_BYTES = 8192
 _COMPONENT_ID = re.compile(r"[A-Z0-9][A-Z0-9_.-]{0,63}")
 
+ComponentType = Literal["RDBMS", "CACHE", "QUEUE", "API", "MCP"]
+
 class SignalPayload(BaseModel):
     component_id: str
+    component_type: Optional[ComponentType] = None  # picks priority and channels; else inferred from the name
     signal_type: str = Field(max_length=64)
     message: str = Field(max_length=4096)
     severity: Optional[str] = Field("MEDIUM", max_length=32)
@@ -196,3 +205,4 @@ class SLAStats(BaseModel):
     total: int
     breached: int
     breach_rate_pct: float
+    open_by_priority: dict[str, int] = {}

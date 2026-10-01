@@ -1,5 +1,7 @@
 """Work Item service — PostgreSQL + Redis + SLA + comments."""
 from __future__ import annotations
+import base64
+import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -7,7 +9,7 @@ from typing import Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import exists, select, func, update, literal_column, text
+from sqlalchemy import and_, or_, select, func, tuple_, update, literal_column, text
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import selectinload
 
@@ -18,7 +20,7 @@ from app.models.schemas import (
     CommentCreate, CommentResponse, MTTRStats, SLAStats
 )
 from app.services.alert_strategy import get_alert_strategy
-from app.services.state_machine import validate_transition, InvalidTransitionError
+from app.services.state_machine import get_state, InvalidTransitionError
 
 logger = logging.getLogger("ims.work_item")
 
@@ -82,14 +84,15 @@ async def create_work_item(data: WorkItemCreate, db: AsyncSession) -> str:
 
 
 async def upsert_active_work_item(
-    db: AsyncSession, component: str, occurred_at: datetime, signal_type: str, message: str
+    db: AsyncSession, component: str, occurred_at: datetime, signal_type: str, message: str,
+    component_type: str | None = None,
 ) -> Row:
     """Attach a signal to the component's active (OPEN/INVESTIGATING) Work Item, creating one if needed.
 
     A single INSERT ... ON CONFLICT against the partial unique index `ux_wi_active_component`, so
     concurrent callers in any process agree on one incident. Returns the row with a `created` flag.
     """
-    strategy = get_alert_strategy(component)
+    strategy = get_alert_strategy(component, component_type)
     priority = strategy.priority()
     now = _now()
     ins = pg_insert(WorkItem).values(
@@ -143,21 +146,58 @@ async def get_work_item(wi_id: str, db: AsyncSession) -> WorkItemResponse | None
     return resp
 
 
-async def list_work_items(db: AsyncSession, status: str | None = None) -> list[WorkItemResponse]:
-    cache_key = f"wi:list:{status or 'all'}"
+MAX_PAGE = 500
+
+
+def _encode_cursor(wi: WorkItem) -> str:
+    raw = json.dumps([wi.priority, wi.created_at.isoformat(), wi.id])
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[str, datetime, str]:
+    try:
+        priority, created_at, wi_id = json.loads(base64.urlsafe_b64decode(cursor))
+        created = datetime.fromisoformat(created_at)
+        if priority not in SLA_MINUTES or not isinstance(wi_id, str) or created.tzinfo is None:
+            raise ValueError
+        return priority, created, wi_id
+    except Exception:
+        raise ValueError("Invalid cursor") from None
+
+
+async def list_work_items(
+    db: AsyncSession, status: str | None = None, limit: int = 100, cursor: str | None = None
+) -> dict:
+    """One page, ordered priority then newest first then id: {"items": [...], "next_cursor": str | None}.
+
+    Keyset pagination: the cursor is the last row's sort key, so pages stay stable while incidents
+    are created. Pages are cached under a generation counter that every write bumps (no KEYS scan).
+    """
+    limit = min(max(limit, 1), MAX_PAGE)
+    after = _decode_cursor(cursor) if cursor else None  # validated before the cache, so a bad cursor is always 422
+
+    gen = await cache.get_val("wi:list:gen") or 0
+    cache_key = f"wi:list:{gen}:{status or 'all'}:{limit}:{cursor or ''}"
     cached = await cache.get_val(cache_key)
     if cached:
-        return [WorkItemResponse(**i) for i in cached]
+        return cached
 
     q = select(WorkItem).options(selectinload(WorkItem.assignee))
     if status:
         q = q.where(WorkItem.status == status)
-    q = q.order_by(WorkItem.priority, WorkItem.created_at.desc())
+    if after:
+        p, c, i = after
+        q = q.where(or_(WorkItem.priority > p,
+                        and_(WorkItem.priority == p, tuple_(WorkItem.created_at, WorkItem.id) < tuple_(c, i))))
+    q = q.order_by(WorkItem.priority, WorkItem.created_at.desc(), WorkItem.id.desc()).limit(limit + 1)
 
-    result = await db.execute(q)
-    items = [_wi_to_response(wi) for wi in result.scalars().all()]
-    await cache.set_val(cache_key, [i.model_dump(mode="json") for i in items], ttl=30)
-    return items
+    rows = (await db.execute(q)).scalars().all()
+    page = {
+        "items": [_wi_to_response(wi).model_dump(mode="json") for wi in rows[:limit]],
+        "next_cursor": _encode_cursor(rows[limit - 1]) if len(rows) > limit else None,
+    }
+    await cache.set_val(cache_key, page, ttl=30)
+    return page
 
 
 async def _load_response(wi_id: str, db: AsyncSession) -> WorkItemResponse:
@@ -178,11 +218,9 @@ async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> Wo
     if current is None:
         raise ValueError(f"Work item {wi_id} not found")
 
-    validate_transition(current, new_status)
+    target = get_state(current).transition_to(new_status)
 
-    conditions = [WorkItem.id == wi_id, WorkItem.status == current]
-    if new_status == "CLOSED":
-        conditions.append(exists().where(RCARecord.work_item_id == wi_id))
+    conditions = [WorkItem.id == wi_id, WorkItem.status == current, *target.entry_conditions(wi_id)]
     updated = (await db.execute(
         update(WorkItem).where(*conditions).values(status=new_status, updated_at=_now()).returning(WorkItem.id)
     )).scalar_one_or_none()
@@ -191,7 +229,7 @@ async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> Wo
         latest = (await db.execute(select(WorkItem.status).where(WorkItem.id == wi_id))).scalar_one()
         if latest != current:
             raise ConflictError(f"Work item moved to {latest} while this request was in flight.")
-        raise ValueError("Cannot CLOSE: RCA record missing.")
+        raise ValueError(target.guard_message)
 
     await db.commit()
     await invalidate_cache(wi_id)
@@ -366,10 +404,19 @@ async def get_sla_stats(db: AsyncSession) -> SLAStats:
         )
     )
     breached = breached_r.scalar() or 0
+
+    by_priority = await db.execute(
+        select(WorkItem.priority, func.count(WorkItem.id))
+        .where(WorkItem.status.notin_(["RESOLVED", "CLOSED"]))
+        .group_by(WorkItem.priority)
+    )
+    open_by_priority = {p: 0 for p in ("P0", "P1", "P2", "P3")}
+    open_by_priority.update(dict(by_priority.all()))
     return SLAStats(
         total=total,
         breached=breached,
         breach_rate_pct=round(breached / total * 100, 1) if total else 0.0,
+        open_by_priority=open_by_priority,
     )
 
 
@@ -377,4 +424,4 @@ async def invalidate_cache(wi_id: str | None = None):
     """Drop cached dashboard reads. Call only after the write has committed."""
     if wi_id:
         await cache.delete_val(f"wi:{wi_id}")
-    await cache.delete_pattern("wi:list:*")
+    await cache.bump("wi:list:gen")

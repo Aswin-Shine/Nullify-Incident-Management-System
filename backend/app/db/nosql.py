@@ -7,17 +7,23 @@ import asyncio
 import json
 import os
 import re
+from collections import defaultdict
 
 import aiofiles
 
 from app.core.config import get_settings
 
-_lock = asyncio.Lock()  # ponytail: one global lock serialises all lake writes (B-15); replaced in Phase 1
+# ponytail: one lock per lake file, per process. Workers in other processes rely on O_APPEND keeping
+# each line (under 4 KB, the usual signal) atomic; a cross-process file lock if lines grow past that.
+_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_made_dirs: set[str] = set()
 
 
 def _path(component: str) -> str:
     lake_dir = get_settings().lake_dir
-    os.makedirs(lake_dir, exist_ok=True)
+    if lake_dir not in _made_dirs:
+        os.makedirs(lake_dir, exist_ok=True)
+        _made_dirs.add(lake_dir)
     safe = re.sub(r"[^A-Z0-9_.-]", "_", component.upper())[:64] or "UNKNOWN"  # allowlist, not blocklist
     return os.path.join(lake_dir, f"{safe}.jsonl")
 
@@ -25,6 +31,6 @@ def _path(component: str) -> str:
 async def append_signal(signal: dict):
     """Append one raw signal to its component's JSONL file."""
     path = _path(signal.get("component_id", "UNKNOWN"))
-    async with _lock:
+    async with _locks[path]:
         async with aiofiles.open(path, "a") as f:
             await f.write(json.dumps(signal, default=str) + "\n")

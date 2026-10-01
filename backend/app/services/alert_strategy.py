@@ -1,12 +1,19 @@
-"""Alerting Strategy — Strategy design pattern.
+"""Alerting Strategy: Strategy design pattern.
 
-Each ComponentType maps to an AlertStrategy that decides priority and notification text.
+Each component type maps to an AlertStrategy that decides priority, notification text and which
+channels are notified (PagerDuty pages only for P0/P1).
 """
 from __future__ import annotations
+import re
 from abc import ABC, abstractmethod
+
+PAGE_AND_SLACK = ("pagerduty", "slack")
+SLACK_ONLY = ("slack",)
 
 
 class AlertStrategy(ABC):
+    channels: tuple[str, ...] = SLACK_ONLY
+
     @abstractmethod
     def priority(self) -> str: ...
 
@@ -15,6 +22,8 @@ class AlertStrategy(ABC):
 
 
 class RDBMSAlertStrategy(AlertStrategy):
+    channels = PAGE_AND_SLACK
+
     def priority(self) -> str:
         return "P0"
 
@@ -31,6 +40,8 @@ class CacheAlertStrategy(AlertStrategy):
 
 
 class QueueAlertStrategy(AlertStrategy):
+    channels = PAGE_AND_SLACK
+
     def priority(self) -> str:
         return "P1"
 
@@ -39,6 +50,8 @@ class QueueAlertStrategy(AlertStrategy):
 
 
 class APIAlertStrategy(AlertStrategy):
+    channels = PAGE_AND_SLACK
+
     def priority(self) -> str:
         return "P1"
 
@@ -47,6 +60,8 @@ class APIAlertStrategy(AlertStrategy):
 
 
 class MCPAlertStrategy(AlertStrategy):
+    channels = PAGE_AND_SLACK
+
     def priority(self) -> str:
         return "P1"
 
@@ -80,10 +95,11 @@ _COMPONENT_STRATEGY_MAP: dict[str, type[AlertStrategy]] = {
 }
 
 
-def get_alert_strategy(component_id: str) -> AlertStrategy:
-    """Resolve strategy from component_id prefix (e.g. CACHE_CLUSTER_01 → Cache)."""
-    upper = component_id.upper()
-    for key, cls in _COMPONENT_STRATEGY_MAP.items():
-        if upper.startswith(key):
-            return cls()
+def get_alert_strategy(component_id: str, component_type: str | None = None) -> AlertStrategy:
+    """An explicit component type (RDBMS, CACHE, QUEUE, API, MCP) wins; otherwise the first name token
+    that is a known key (PRIMARY_DB -> DB -> RDBMS, CACHE_CLUSTER_01 -> CACHE)."""
+    tokens = ([component_type.upper()] if component_type else []) + re.split(r"[_.-]", component_id.upper())
+    for token in tokens:
+        if token in _COMPONENT_STRATEGY_MAP:
+            return _COMPONENT_STRATEGY_MAP[token]()
     return DefaultAlertStrategy()

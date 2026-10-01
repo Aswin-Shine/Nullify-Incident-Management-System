@@ -6,6 +6,7 @@ stays correct across any number of worker tasks, processes or replicas.
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -63,7 +64,8 @@ async def _persist(component: str, record: dict, occurred: datetime, received: d
     """One transaction: attach to the active Work Item, store the linked signal, bump the timeseries."""
     async with AsyncSessionLocal() as db:
         wi = await upsert_active_work_item(
-            db, component, occurred, record.get("signal_type") or "FAILURE", record.get("message") or ""
+            db, component, occurred, record.get("signal_type") or "FAILURE", record.get("message") or "",
+            record.get("component_type"),
         )
         db.add(Signal(
             work_item_id=wi.id, component=component, signal_type=record.get("signal_type") or "FAILURE",
@@ -106,7 +108,7 @@ async def process_signal(signal: dict) -> str | None:
         await invalidate_cache()
         asyncio.create_task(webhooks.notify_incident_created({
             "id": wi.id, "component": wi.component, "priority": wi.priority,
-            "title": wi.title, "description": wi.description,
+            "title": wi.title, "description": wi.description, "component_type": record.get("component_type"),
         }))
         logger.info("Work item %s opened for %s", wi.id, component)
 
@@ -138,15 +140,23 @@ async def _worker():
             _queue.task_done()
 
 
+def _throughput_line(processed: int, elapsed: float, depth: int, cap: int) -> str | None:
+    """The log line for one interval, or None when this process was idle (nothing done, nothing queued)."""
+    if processed == 0 and depth == 0:
+        return None
+    rate = processed / elapsed if elapsed > 0 else 0
+    return f"THROUGHPUT pid={os.getpid()}: {rate:.1f} sig/sec | q={depth}/{cap} | total={processed}"
+
+
 async def _metrics_printer():
+    # Per process: each uvicorn worker has its own queue and counters, hence the pid in the line.
     global _processed_count, _last_metric_time
     while True:
         await asyncio.sleep(5)
         now = time.monotonic()
-        elapsed = now - _last_metric_time
-        rate = _processed_count / elapsed if elapsed > 0 else 0
-        logger.info("THROUGHPUT: %.1f sig/sec | q=%d/%d | total=%d",
-                    rate, _queue.qsize(), _queue.maxsize, _processed_count)
+        line = _throughput_line(_processed_count, now - _last_metric_time, _queue.qsize(), _queue.maxsize)
+        if line:
+            logger.info(line)
         _processed_count = 0
         _last_metric_time = now
 

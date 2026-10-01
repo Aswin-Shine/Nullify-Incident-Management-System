@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     def database_url_sync(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
+    # Connections per process = pool + overflow. Every uvicorn worker has its own pool, so
+    # workers x (pool + overflow) must stay under Postgres max_connections (default 100).
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379
