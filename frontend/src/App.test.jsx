@@ -10,9 +10,12 @@ vi.mock('./components/IncidentDetail', () => ({ IncidentDetail: ({ id }) => <div
 vi.mock('./api/client', async (orig) => ({
   ...(await orig()),
   refreshSession: vi.fn(), fetchWorkItems: vi.fn(), fetchHealth: vi.fn(), listUsers: vi.fn(),
+  fetchMTTR: vi.fn(), fetchSLA: vi.fn(), fetchTimeseries: vi.fn(),
 }))
 
 afterEach(() => {
+  delete document.documentElement.dataset.theme
+  localStorage.clear()
   window.history.replaceState(null, '', '/')
   Object.defineProperty(document, 'hidden', { value: false, configurable: true })
   vi.unstubAllGlobals()
@@ -23,6 +26,9 @@ beforeEach(() => {
   document.title = 'Nullify'
   api.fetchWorkItems.mockResolvedValue({ items: [], next_cursor: null })
   api.fetchHealth.mockResolvedValue({ status: 'ok' })
+  api.fetchMTTR.mockResolvedValue([])  // same for the Analytics tab: its 401 landed in the next test
+  api.fetchSLA.mockResolvedValue({ total: 0, breached: 0, breach_rate_pct: 0, open_by_priority: {} })
+  api.fetchTimeseries.mockResolvedValue([])
   api.listUsers.mockResolvedValue([])  // an unmocked call hit the network and its 401 signed the test user out
 })
 
@@ -149,4 +155,81 @@ test('the live feed labels assignment and creation events readably', async () =>
   expect((await screen.findAllByText('assignment changed')).length).toBeGreaterThan(0)
   expect(screen.getAllByText('new P2 CACHE_7').length).toBeGreaterThan(0)
   expect(screen.queryByText('work_item_assigned')).toBeNull()
+})
+
+test('the sidebar is a navigation landmark named Main', async () => {
+  await open('sre')
+  expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
+})
+
+test('the theme toggle cycles System to Light and sets data-theme on the page', async () => {
+  await open('sre')
+  await userEvent.click(screen.getByRole('button', { name: 'Theme: System' }))
+  expect(screen.getByRole('button', { name: 'Theme: Light' })).toBeTruthy()
+  expect(document.documentElement.dataset.theme).toBe('light')
+  await userEvent.click(screen.getByRole('button', { name: 'Theme: Light' }))
+  expect(document.documentElement.dataset.theme).toBe('dark')
+  await userEvent.click(screen.getByRole('button', { name: 'Theme: Dark' }))
+  expect(document.documentElement.dataset.theme).toBeUndefined()
+})
+
+test('the split handle starts at 560 on a wide window', async () => {
+  vi.stubGlobal('innerWidth', 1440)
+  await open('sre')
+  expect(screen.getByRole('separator', { name: 'Resize incident list' }).getAttribute('aria-valuenow')).toBe('560')
+})
+
+test('the split handle is on Incidents and gone on Analytics', async () => {
+  await open('sre')
+  const sep = screen.getByRole('separator', { name: 'Resize incident list' })
+  expect(sep.getAttribute('aria-orientation')).toBe('vertical')
+  expect(sep.getAttribute('aria-valuenow')).toBe('408')  // jsdom is 1024px wide: 1024 - 56 - 560 leaves 408
+  await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+  expect(screen.queryByRole('separator', { name: 'Resize incident list' })).toBeNull()
+})
+
+test('the sidebar Search button opens the command palette', async () => {
+  await open('sre')
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+  expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeTruthy()
+})
+
+test.each([['Control', '{Control>}k{/Control}'], ['Meta', '{Meta>}k{/Meta}']])('%s+K opens the palette and a second press closes it', async (_, combo) => {
+  await open('sre')
+  await userEvent.keyboard(combo)
+  expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeTruthy()
+  await userEvent.keyboard(combo)
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+})
+
+test('Escape closes the palette and focus returns to the Search button', async () => {
+  await open('sre')
+  const trigger = screen.getByRole('button', { name: 'Search' })
+  await userEvent.click(trigger)
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+  expect(document.activeElement).toBe(trigger)
+})
+
+test('"Go to Analytics" from the palette switches the tab', async () => {
+  await open('sre')
+  await userEvent.keyboard('{Control>}k{/Control}')
+  await userEvent.type(screen.getByRole('combobox', { name: 'Search commands and incidents' }), 'ana')
+  await userEvent.keyboard('{Enter}')
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Analytics' }).getAttribute('aria-current')).toBe('page')
+})
+
+test('opening an incident from the palette selects it on the Incidents tab', async () => {
+  api.fetchWorkItems.mockResolvedValue({
+    items: [{ id: 'wi-5', component: 'CACHE_5', priority: 'P2', status: 'OPEN', title: 't', created_at: new Date().toISOString() }], next_cursor: null,
+  })
+  await open('sre')
+  await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+  await userEvent.keyboard('{Control>}k{/Control}')
+  await userEvent.type(screen.getByRole('combobox', { name: 'Search commands and incidents' }), 'cache')
+  await userEvent.click(await screen.findByRole('option', { name: /Open CACHE_5/ }, { timeout: 2000 }))
+  expect(window.location.search).toBe('?incident=wi-5')
+  expect(screen.getByRole('button', { name: 'Incidents' }).getAttribute('aria-current')).toBe('page')
 })

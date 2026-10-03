@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ToastContext } from '../context/toast';
+import { Icon } from './Icon';
 
 const MAX_TOASTS = 3;
 const TTL_MS = { alert: 10000 };  // a new P0 stays longer than a "Saved"
@@ -21,7 +22,7 @@ function Toast({ toast, onDismiss }) {
           {action.label}
         </button>
       )}
-      <button type="button" className="toast-close" aria-label="Dismiss" onClick={() => onDismiss(id)}>×</button>
+      <button type="button" className="toast-close" aria-label="Dismiss" onClick={() => onDismiss(id)}><Icon name="x" size={14} /></button>
     </div>
   );
 }

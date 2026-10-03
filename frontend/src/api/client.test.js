@@ -85,3 +85,11 @@ test('fetchWorkItems sends only the filters that are set, and fetchHistory hits 
   await client.fetchHistory('wi-1')
   expect(get).toHaveBeenLastCalledWith('/api/work-items/wi-1/history')
 })
+
+test('fetchTimeseries asks for the last 60 minutes', async () => {
+  const { client } = await load()
+  let params
+  client.api.defaults.adapter = async (config) => { params = config.params; return { data: [], status: 200, statusText: '', headers: {}, config } }
+  await client.fetchTimeseries()
+  expect(params).toEqual({ limit: 60 })
+})

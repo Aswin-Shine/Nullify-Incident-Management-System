@@ -3,6 +3,7 @@ import { useAuth } from '../context/auth';
 import { errorMessage } from '../api/client';
 import { ErrorNote } from './ErrorNote';
 import { Field } from './Field';
+import { Icon } from './Icon';
 
 // Accounts are invite-only: an admin creates them (API or `python -m app.cli create-user`).
 export function LoginPage() {
@@ -22,10 +23,10 @@ export function LoginPage() {
   };
 
   return (
-    <div className="login">
-      <div className="glass login-card">
+    <main className="login">
+      <div className="panel login-card">
         <div className="login-head">
-          <div className="login-logo">∅</div>
+          <div className="login-logo"><Icon name="null" size={24} /></div>
           <h1>Nullify</h1>
           <p>Incidents, terminated.</p>
         </div>
@@ -41,11 +42,11 @@ export function LoginPage() {
           {error && <ErrorNote>{error}</ErrorNote>}
 
           <button type="submit" disabled={loading} className="btn btn-primary login-submit">
-            {loading ? <span className="spinner" /> : 'Sign In'}
+            {loading ? <span className="spinner" /> : 'Sign in'}
           </button>
           <p className="login-note">Accounts are created by an administrator.</p>
         </form>
       </div>
-    </div>
+    </main>
   );
 }

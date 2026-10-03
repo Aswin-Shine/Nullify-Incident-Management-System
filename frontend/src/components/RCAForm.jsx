@@ -3,6 +3,7 @@ import { submitRCA, errorMessage } from '../api/client';
 import { toLocalInput, rcaToMarkdown } from '../format';
 import { ErrorNote } from './ErrorNote';
 import { Field } from './Field';
+import { Icon } from './Icon';
 
 const CATEGORIES = [
   'Infrastructure Failure',
@@ -69,16 +70,16 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false }) {
   };
 
   return (
-    <div className="glass rca">
+    <div className="panel rca">
       <div className="rca-head">
         <div className="rca-title">
-          <span className="rca-mark">◈</span>
+          <span className="rca-mark"><Icon name="alert-triangle" /></span>
           <h3>Root Cause Analysis</h3>
         </div>
         {rca && (
           <div className="rca-actions">
-            <button type="button" className="pill" onClick={() => downloadMarkdown(workItem, rca)}>Export Markdown</button>
-            <span className="chip submitted" data-level="p3">✓ Submitted</span>
+            <button type="button" className="pill" onClick={() => downloadMarkdown(workItem, rca)}><Icon name="download" size={12} />Export Markdown</button>
+            <span className="chip submitted" data-level="p3"><Icon name="check" size={12} />Submitted</span>
           </div>
         )}
       </div>

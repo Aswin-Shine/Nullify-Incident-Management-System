@@ -50,7 +50,7 @@ export function UsersPanel() {
 
   return (
     <div className="panel-page panel-wide">
-      <section className="glass card panel-card">
+      <section className="panel card panel-card">
         <h2 className="card-title">Users</h2>
         {accounts.error && <ErrorNote>{errorMessage(accounts.error, 'Could not load users')}</ErrorNote>}
         <table className="users-table">
@@ -83,7 +83,7 @@ export function UsersPanel() {
         {error && <ErrorNote>{error}</ErrorNote>}
       </section>
 
-      <form className="glass card panel-card" onSubmit={create}>
+      <form className="panel card panel-card" onSubmit={create}>
         <h2 className="card-title">Create user</h2>
         <div className="injector-pair">
           <Field label="Username">{id => <input id={id} name="username" autoComplete="off" value={form.username} onChange={set('username')} />}</Field>

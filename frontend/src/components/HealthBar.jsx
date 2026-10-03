@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { fetchHealth } from '../api/client';
 
+// A 32px status strip: service state, queue depth, then the live event feed (newest first, older ones fade).
 export function HealthBar({ liveEvents = [] }) {
   const [health, setHealth] = useState(null);
 
@@ -19,34 +20,26 @@ export function HealthBar({ liveEvents = [] }) {
 
   return (
     <div className="health-bar">
-      <div className="health-left">
-        <div className="health-state" data-ok={isHealthy}>
-          <div className="health-dot" />
-          <span>{isHealthy ? 'HEALTHY' : 'DEGRADED'}</span>
-        </div>
-        <div className="health-sep" />
-        <div className="health-queue">
-          <span>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
-          <span className="queue-pct" data-hot={qPct > 80}>{qPct}%</span>
-        </div>
+      <div className="health-state" data-ok={isHealthy}>
+        <span className="health-dot" />
+        <span>{isHealthy ? 'HEALTHY' : 'DEGRADED'}</span>
+      </div>
+
+      <div className="health-queue" data-hot={qPct > 80}>
+        <span>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
+        <span className="meter" aria-hidden="true">
+          <span className="meter-fill" style={{ width: `${Math.min(100, qPct)}%` }} />
+        </span>
       </div>
 
       <div className="health-feed">
         {liveEvents.length > 0 ? (
-          <div className="feed-list">
-            {liveEvents.map((e, i) => (
-              <span key={i} className="feed-item" data-first={i === 0} style={{ opacity: 1 - i * 0.15 }}>{e}</span>
-            ))}
-          </div>
+          liveEvents.map((e, i) => (
+            <span key={i} className="feed-item" data-first={i === 0} style={{ opacity: 1 - i * 0.18 }}>{e}</span>
+          ))
         ) : (
-          <span className="feed-idle">Waiting for signals… ∅ Ingestion pipeline active</span>
+          <span className="feed-idle">Waiting for signals</span>
         )}
-      </div>
-
-      <div className="health-right">
-        {liveEvents.slice(0, 3).map((e, i) => (
-          <div key={i} className="feed-chip" data-first={i === 0}>{e}</div>
-        ))}
       </div>
     </div>
   );

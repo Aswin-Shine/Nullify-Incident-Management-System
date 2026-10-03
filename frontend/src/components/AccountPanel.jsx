@@ -30,7 +30,7 @@ function PasswordCard() {
   };
 
   return (
-    <form className="glass card panel-card" onSubmit={submit}>
+    <form className="panel card panel-card" onSubmit={submit}>
       <h2 className="card-title">Change password</h2>
       <p className="muted">At least 12 characters. Your other sessions are signed out.</p>
       {/* Lets password managers tie the new password to this account. */}
@@ -71,7 +71,7 @@ function ApiKeyCard() {
   };
 
   return (
-    <section className="glass card panel-card">
+    <section className="panel card panel-card">
       <h2 className="card-title">API key</h2>
       <p className="muted">
         {user?.has_api_key
@@ -81,12 +81,12 @@ function ApiKeyCard() {
       {key && (
         <div className="key-row">
           <input name="api_key" aria-label="New API key" readOnly value={key} onFocus={e => e.target.select()} />
-          <button type="button" className="btn btn-primary" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+          <button type="button" className="btn btn-secondary" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
         </div>
       )}
       {key && <div className="note-warn"><p>This key will not be shown again.</p></div>}
       {error && <ErrorNote>{error}</ErrorNote>}
-      <button type="button" className="btn btn-primary" onClick={generate}>Generate key</button>
+      <button type="button" className="btn btn-secondary" onClick={generate}>Generate key</button>
     </section>
   );
 }
@@ -97,11 +97,11 @@ function AlertsCard() {
   const enable = async () => setPermission(await Notification.requestPermission());
 
   return (
-    <section className="glass card panel-card">
+    <section className="panel card panel-card">
       <h2 className="card-title">Desktop alerts</h2>
       <p className="muted">Get a browser notification when a new P0 opens while this tab is in the background.</p>
       <p className="muted">Permission: {permission}{permission === 'denied' ? ' (change it in the browser site settings)' : ''}</p>
-      <button type="button" className="btn btn-primary" onClick={enable} disabled={permission !== 'default'}>
+      <button type="button" className="btn btn-secondary" onClick={enable} disabled={permission !== 'default'}>
         Enable desktop alerts
       </button>
     </section>

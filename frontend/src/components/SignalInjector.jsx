@@ -18,15 +18,15 @@ export function SignalInjector({ onSent }) {
       for (let i = 0; i < data.count; i++) {
         await ingestSignal({ component_id: data.component, signal_type: data.type, message: msg, severity: 'HIGH' });
       }
-      setStatus({ type: 'success', text: `✓ Injected ${data.count} signal${data.count > 1 ? 's' : ''} successfully.` });
+      setStatus({ type: 'success', text: `Injected ${data.count} signal${data.count > 1 ? 's' : ''} successfully.` });
       onSent?.();
     } catch (err) {
-      setStatus({ type: 'error', text: '✗ ' + errorMessage(err, 'Injection failed.') });
+      setStatus({ type: 'error', text: errorMessage(err, 'Injection failed.') });
     } finally { setLoading(false); }
   };
 
   return (
-    <form className="glass injector" onSubmit={handleInject}>
+    <form className="panel injector" onSubmit={handleInject}>
       <h2>Signal Injector</h2>
       <p className="injector-sub">Simulate infrastructure events</p>
 

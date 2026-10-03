@@ -125,6 +125,64 @@ test('rows show the assignee, or Unassigned', async () => {
   expect(free.textContent).toContain('Unassigned')
 })
 
+describe('sorting', () => {
+  const order = () => [...document.querySelectorAll('[data-incident-id]')].map(el => el.dataset.incidentId)
+  const three = (next = null) => page([
+    workItem({ id: 'b', component: 'COMP_B' }), workItem({ id: 'c', component: 'COMP_C' }), workItem({ id: 'a', component: 'COMP_A' }),
+  ], next)
+  const sortBtn = (name) => screen.getByRole('button', { name: `Sort by ${name}` })
+
+  test('there is one sort button per column and Priority starts pressed', async () => {
+    api.fetchWorkItems.mockResolvedValue(three())
+    render(<IncidentList onSelect={() => {}} />)
+    await screen.findByText('COMP_A')
+    for (const name of ['Priority', 'Component', 'Status', 'SLA', 'Assignee', 'Age']) expect(sortBtn(name)).toBeTruthy()
+    expect(sortBtn('Priority').getAttribute('aria-pressed')).toBe('true')
+    expect(sortBtn('Component').getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('group', { name: 'Sort incidents' })).toBeTruthy()
+  })
+
+  test('clicking Component orders the rows A-Z, a second click Z-A', async () => {
+    api.fetchWorkItems.mockResolvedValue(three())
+    render(<IncidentList onSelect={() => {}} />)
+    await screen.findByText('COMP_A')
+    expect(order()).toEqual(['b', 'c', 'a'])
+    await userEvent.click(sortBtn('Component'))
+    expect(order()).toEqual(['a', 'b', 'c'])
+    expect(sortBtn('Component').getAttribute('aria-pressed')).toBe('true')
+    expect(sortBtn('Priority').getAttribute('aria-pressed')).toBe('false')
+    await userEvent.click(sortBtn('Component'))
+    expect(order()).toEqual(['c', 'b', 'a'])
+  })
+
+  test('j follows the sorted order: from no selection it picks the alphabetically first row', async () => {
+    api.fetchWorkItems.mockResolvedValue(three())
+    const onSelect = vi.fn()
+    render(<IncidentList onSelect={onSelect} />)
+    await screen.findByText('COMP_A')
+    await userEvent.click(sortBtn('Component'))
+    fireEvent.keyDown(document.body, { key: 'j' })
+    expect(onSelect).toHaveBeenLastCalledWith('a')
+  })
+
+  test('with more pages on the server a non-default sort says it only covers the loaded rows', async () => {
+    api.fetchWorkItems.mockResolvedValue(page([workItem({ id: 'b', component: 'COMP_B' }), workItem({ id: 'a', component: 'COMP_A' })], 'cursor-1'))
+    render(<IncidentList onSelect={() => {}} />)
+    await screen.findByText('COMP_A')
+    expect(screen.queryByText(/Sorted within/)).toBeNull()
+    await userEvent.click(sortBtn('Component'))
+    expect(screen.getByText('Sorted within the 2 loaded incidents')).toBeTruthy()
+  })
+
+  test('no hint without another page, even under a non-default sort', async () => {
+    api.fetchWorkItems.mockResolvedValue(three())
+    render(<IncidentList onSelect={() => {}} />)
+    await screen.findByText('COMP_A')
+    await userEvent.click(sortBtn('Component'))
+    expect(screen.queryByText(/Sorted within/)).toBeNull()
+  })
+})
+
 describe('keyboard shortcuts', () => {
   const three = () => page([
     workItem({ id: 'a', component: 'COMP_A' }), workItem({ id: 'b', component: 'COMP_B' }), workItem({ id: 'c', component: 'COMP_C' }),

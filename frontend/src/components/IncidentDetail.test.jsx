@@ -1,4 +1,4 @@
-import { screen, act, waitFor, within } from '@testing-library/react'
+import { screen, act, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { IncidentDetail } from './IncidentDetail'
 import * as api from '../api/client'
@@ -170,4 +170,22 @@ test('switching incidents gives a fresh RCA form with that incident\'s own times
   await screen.findByRole('heading', { name: 'CACHE_B' })
   await waitFor(() => expect(screen.getByLabelText('Fix Applied').value).toBe(''))
   expect(new Date(screen.getByLabelText('Impact Start').value).toISOString()).toBe(b.start_time)
+})
+
+test('Copy link writes the incident URL to the clipboard and toasts', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+  await renderAs('viewer', <IncidentDetail id="wi-1" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Copy link' }))
+  expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/?incident=wi-1`)
+  expect(await screen.findByText('Link copied')).toBeTruthy()
+})
+
+test('a clipboard that refuses the write shows an error toast', async () => {
+  const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+  await renderAs('viewer', <IncidentDetail id="wi-1" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Copy link' }))
+  const toast = (await screen.findByText('Could not copy the link')).closest('.toast')
+  expect(toast.dataset.kind).toBe('error')
 })

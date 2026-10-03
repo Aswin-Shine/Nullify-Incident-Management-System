@@ -4,6 +4,7 @@ import { PriorityBadge, StatusBadge } from './Badges';
 import { RCAForm } from './RCAForm';
 import { CommentsSection } from './CommentsSection';
 import { ErrorNote } from './ErrorNote';
+import { Icon } from './Icon';
 import {
   fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers, errorMessage,
 } from '../api/client';
@@ -11,7 +12,7 @@ import { useAuth, canWrite } from '../context/auth';
 import { useToast } from '../context/toast';
 import { useQuery } from '../hooks/useQuery';
 import { useNow } from '../hooks/useNow';
-import { avatarColor, fmtMTTR } from '../format';
+import { fmtMTTR } from '../format';
 
 const NEXT = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] };
 const TRANSITION_LABEL = { INVESTIGATING: 'Start Investigating', RESOLVED: 'Mark Resolved', CLOSED: 'Close Incident' };
@@ -59,7 +60,7 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
 
   if (!id) return (
     <div className="empty-state detail-empty">
-      <div className="empty-mark">∅</div>
+      <div className="empty-mark"><Icon name="null" size={32} /></div>
       <h3>Select an incident</h3>
       <p>Real-time telemetry will appear here.</p>
     </div>
@@ -75,6 +76,15 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
     );
   }
 
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}/?incident=${incident.id}`);
+      toast('Link copied');
+    } catch {
+      toast('Could not copy the link', { kind: 'error' });  // no clipboard on plain http, or the browser refused
+    }
+  };
+
   const mttr = fmtMTTR(incident.mttr_seconds);
   const transitions = write ? NEXT[incident.status] || [] : [];
   const signalList = signals.data ?? [];
@@ -83,72 +93,78 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
 
   return (
     <div className="detail">
-      <div className="glass detail-card">
+      <div className="panel detail-card">
         <div className="detail-badges">
           <PriorityBadge priority={incident.priority} />
           <StatusBadge status={incident.status} />
           <div className="detail-badges-right">
-            {mttr && <span className="mttr-chip">MTTR: {mttr}</span>}
+            {mttr && <span className="mttr-chip">MTTR {mttr}</span>}
             <SlaChip deadline={incident.sla_deadline} status={incident.status} />
           </div>
         </div>
 
         <h1>{incident.component}</h1>
-        <p className="detail-meta">
-          #{incident.id} · Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}
-        </p>
-
-        <div className="assignee">
-          {incident.assignee_username && (
-            <div className="avatar avatar-lg" style={{ background: avatarColor(incident.assignee_username) }}>
-              {incident.assignee_username[0].toUpperCase()}
-            </div>
-          )}
-          {write ? (
-            <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''}
-              onChange={e => mutate(
-                () => assignWorkItem(id, e.target.value || null),
-                updated => updated.assignee_username ? `Assigned to ${updated.assignee_username}` : 'Incident unassigned')}>
-              <option value="">Unassigned</option>
-              {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
-                <option value={incident.assignee_id}>{incident.assignee_username}</option>
-              )}
-              {assignable.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
-            </select>
-          ) : incident.assignee_username ? (
-            <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
-          ) : (
-            <span className="assignee-text">Unassigned</span>
-          )}
+        <div className="detail-meta">
+          <span className="detail-id">{incident.id}</span>
+          <button type="button" className="btn-link copy-link" onClick={copyLink}>
+            <Icon name="link" size={12} />Copy link
+          </button>
+          <span>Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}</span>
         </div>
 
-        {transitions.length > 0 && (
-          <div className="transitions">
-            {transitions.map(st => {
-              const blocked = st === 'CLOSED' && !rca.data;
-              return (
-                <button type="button" key={st} className="transition-btn" data-to={st} data-blocked={blocked}
-                  onClick={() => doTransition(st)} disabled={!!transitioning || blocked}
-                  title={blocked ? 'Submit RCA first' : ''}>
-                  {transitioning === st ? <span className="spinner" /> : TRANSITION_LABEL[st]}
-                </button>
-              );
-            })}
+        <div className="action-bar">
+          <div className="assignee">
+            {incident.assignee_username && (
+              <div className="avatar avatar-lg">
+                {incident.assignee_username[0].toUpperCase()}
+              </div>
+            )}
+            {write ? (
+              <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''}
+                onChange={e => mutate(
+                  () => assignWorkItem(id, e.target.value || null),
+                  updated => updated.assignee_username ? `Assigned to ${updated.assignee_username}` : 'Incident unassigned')}>
+                <option value="">Unassigned</option>
+                {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
+                  <option value={incident.assignee_id}>{incident.assignee_username}</option>
+                )}
+                {assignable.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
+              </select>
+            ) : incident.assignee_username ? (
+              <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
+            ) : (
+              <span className="assignee-text">Unassigned</span>
+            )}
           </div>
-        )}
+
+          {transitions.length > 0 && (
+            <div className="transitions">
+              {transitions.map(st => {
+                const blocked = st === 'CLOSED' && !rca.data;
+                return (
+                  <button type="button" key={st} className="transition-btn" data-to={st} data-blocked={blocked}
+                    onClick={() => doTransition(st)} disabled={!!transitioning || blocked}
+                    title={blocked ? 'Submit RCA first' : ''}>
+                    {transitioning === st ? <span className="spinner" /> : TRANSITION_LABEL[st]}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="signals">
         <button type="button" className="btn-bare signals-toggle" aria-expanded={signalsOpen}
           onClick={() => setSignalsOpen(o => !o)}>
           <span className="signals-title">Signals ({signalList.length})</span>
-          <span className="signals-caret" aria-hidden="true">›</span>
+          <span className="signals-caret"><Icon name="chevron-down" size={14} /></span>
         </button>
         {signalsOpen && (
           <div className="signal-list">
             {signalList.map(s => (
               <div key={s.id} className="signal">
-                <span className="signal-dot" data-level={SEVERITY_LEVEL[s.severity] ?? 'p2'} aria-hidden="true">●</span>
+                <span className="signal-dot" data-level={SEVERITY_LEVEL[s.severity] ?? 'p2'} aria-hidden="true" />
                 <span className="signal-msg">{s.message}</span>
                 <span className="signal-meta">
                   {[s.severity, s.timestamp && formatDistanceToNow(new Date(s.timestamp), { addSuffix: true })].filter(Boolean).join(' · ')}
