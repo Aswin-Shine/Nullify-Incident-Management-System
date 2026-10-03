@@ -192,6 +192,14 @@ class CommentResponse(BaseModel):
     body: str
     created_at: datetime
 
+class WorkItemEventResponse(BaseModel):
+    id: str
+    kind: str
+    from_value: Optional[str]
+    to_value: Optional[str]
+    actor_username: Optional[str]  # None = the system
+    created_at: datetime
+
 # ── Analytics ─────────────────────────────────────────────────────────────
 
 class MTTRStats(BaseModel):

@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select, update
@@ -218,3 +218,27 @@ async def test_db_failure_still_writes_audit_log_and_does_not_raise():
 
     [line] = lake_lines("CACHE_DB_DOWN")
     assert line["work_item_id"] is None
+
+
+async def test_new_incident_broadcasts_work_item_created_once():
+    with patch("app.services.ingestion.manager.broadcast", new_callable=AsyncMock) as broadcast:
+        wi_id = await process_signal(sig("RDBMS_PRIMARY"))
+        await process_signal(sig("RDBMS_PRIMARY"))
+        await process_signal(sig("CACHE_OTHER"))
+
+    created = [c.args[0] for c in broadcast.call_args_list if c.args[0]["event"] == "work_item_created"]
+    assert len(created) == 2  # one per incident, not per signal
+    assert created[0] == {"event": "work_item_created", "id": wi_id, "component": "RDBMS_PRIMARY", "priority": "P0"}
+    assert created[1]["component"] == "CACHE_OTHER" and created[1]["priority"] == "P2"
+
+
+async def test_created_event_is_broadcast_after_commit():
+    seen = []
+
+    async def spy(event):
+        seen.append(len(await all_work_items()))  # a fresh session sees only committed rows
+
+    with patch("app.services.ingestion.manager.broadcast", side_effect=spy):
+        await process_signal(sig("RDBMS_PRIMARY"))
+
+    assert seen == [1]

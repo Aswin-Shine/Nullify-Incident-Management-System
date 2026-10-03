@@ -1,6 +1,6 @@
 """Work Items router — full CRUD + comments + RCA + analytics."""
 from __future__ import annotations
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_active_user, require_sre_or_admin
@@ -20,11 +20,15 @@ async def list_work_items(
     status: str | None = None,
     limit: int = 100,
     cursor: str | None = None,
-    _: User = Depends(get_current_active_user),
+    q: str | None = Query(None, max_length=64),
+    priority: str | None = Query(None, pattern="^P[0-3]$"),
+    assignee: str | None = Query(None, pattern="^(me|none)$"),
+    user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        return await work_item_service.list_work_items(db, status, limit, cursor)
+        return await work_item_service.list_work_items(
+            db, status, limit, cursor, q, priority, user.id if assignee == "me" else assignee)
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -70,6 +74,17 @@ async def get_signals(
     return await work_item_service.list_signals(wi_id, db, min(max(limit, 1), 1000))
 
 
+@router.get("/{wi_id}/history")
+async def get_history(
+    wi_id: str,
+    _: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not await work_item_service.get_work_item(wi_id, db):
+        raise HTTPException(404, "Work item not found")
+    return [e.model_dump(mode="json") for e in await work_item_service.list_history(wi_id, db)]
+
+
 @router.patch("/{wi_id}/status")
 async def update_status(
     wi_id: str,
@@ -78,7 +93,7 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        updated = await work_item_service.transition_status(wi_id, body.new_status, db)
+        updated = await work_item_service.transition_status(wi_id, body.new_status, db, user.id)
     except InvalidTransitionError as e:
         raise HTTPException(400, str(e))
     except ConflictError as e:
@@ -101,7 +116,7 @@ async def assign(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        updated = await work_item_service.assign_work_item(wi_id, body.assignee_id, db)
+        updated = await work_item_service.assign_work_item(wi_id, body.assignee_id, db, user.id)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await manager.broadcast({"event": "work_item_assigned", "id": wi_id})

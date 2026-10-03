@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import func, select, update
 
+from app.core.security import create_access_token
 from app.db.postgres import AsyncSessionLocal, RCARecord, User, WorkItem
 from app.models.schemas import WorkItemCreate
 from app.services.ingestion import process_signal
@@ -296,3 +297,107 @@ async def test_list_cache_is_invalidated_without_scanning_redis_keys(client, mak
     assert [i["id"] for i in r.json()["items"]] == [wi_id]
     keys.assert_not_called()
     assert not hasattr(cache, "delete_pattern") and not hasattr(cache, "get_all_with_prefix")
+
+
+# -- Search and filters: q, priority, assignee ---------------------------------
+
+async def make_named(*specs):
+    """Work items from (component, priority) pairs. Returns {component: id}."""
+    ids = {}
+    async with AsyncSessionLocal() as db:
+        for component, priority in specs:
+            ids[component] = await create_work_item(
+                WorkItemCreate(component=component, priority=priority, title=component), db)
+            await db.commit()
+    return ids
+
+
+async def components(client, headers, **params):
+    r = await client.get("/api/work-items", params=params, headers=headers)
+    assert r.status_code == 200, r.text
+    return {i["component"] for i in r.json()["items"]}
+
+
+async def test_q_matches_a_component_substring_case_insensitively(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_named(("RDBMS_PRIMARY", "P0"), ("CACHE_01", "P2"))
+
+    assert await components(client, headers, q="rdbms") == {"RDBMS_PRIMARY"}
+    assert await components(client, headers, q="Imar") == {"RDBMS_PRIMARY"}
+    assert await components(client, headers, q="") == {"RDBMS_PRIMARY", "CACHE_01"}
+
+
+async def test_q_wildcards_are_matched_literally(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_named(("RDBMS_PRIMARY", "P0"), ("QUEUE01", "P2"))
+
+    assert await components(client, headers, q="%") == set()  # a raw % would match everything
+    assert await components(client, headers, q="_") == {"RDBMS_PRIMARY"}  # a raw _ would match every character
+    assert await components(client, headers, q="\\") == set()
+
+
+async def test_q_longer_than_64_characters_is_422(client, make_headers):
+    headers = await make_headers("viewer")
+    r = await client.get("/api/work-items", params={"q": "A" * 65}, headers=headers)
+    assert r.status_code == 422
+
+
+async def test_priority_filter_and_an_unknown_priority_is_422(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_named(("A1", "P0"), ("A2", "P1"), ("A3", "P0"))
+
+    assert await components(client, headers, priority="P0") == {"A1", "A3"}
+    assert (await client.get("/api/work-items", params={"priority": "P9"}, headers=headers)).status_code == 422
+
+
+async def test_assignee_me_and_none(client, make_user):
+    me = await make_user("sre")
+    other = await make_user("sre")
+    headers = {"Authorization": "Bearer " + create_access_token({"sub": me["id"], "role": "sre", "tv": 0})}
+    ids = await make_named(("MINE", "P1"), ("THEIRS", "P1"), ("FREE", "P1"))
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(WorkItem).where(WorkItem.id == ids["MINE"]).values(assignee_id=me["id"]))
+        await db.execute(update(WorkItem).where(WorkItem.id == ids["THEIRS"]).values(assignee_id=other["id"]))
+        await db.commit()
+
+    assert await components(client, headers, assignee="me") == {"MINE"}
+    assert await components(client, headers, assignee="none") == {"FREE"}
+    assert (await client.get("/api/work-items", params={"assignee": "bob"}, headers=headers)).status_code == 422
+
+
+async def test_filters_combine_with_status_and_with_cursor_pages(client, make_headers):
+    headers = await make_headers("viewer")
+    ids = await make_named(*[(f"RDBMS_{i}", "P0") for i in range(5)], ("CACHE_X", "P0"), ("RDBMS_P1", "P1"))
+    await set_status(ids["RDBMS_0"], "INVESTIGATING")
+    await set_status(ids["RDBMS_1"], "INVESTIGATING")
+
+    pages, _ = await walk(client, headers, q="rdbms", priority="P0", limit=2)
+
+    flat = [i for p in pages for i in p]
+    assert [len(p) for p in pages] == [2, 2, 1]
+    assert len(set(flat)) == 5 and set(flat) == {ids[f"RDBMS_{i}"] for i in range(5)}
+    assert await components(client, headers, q="rdbms", priority="P0", status="INVESTIGATING") == {"RDBMS_0", "RDBMS_1"}
+
+
+async def test_different_filters_do_not_share_a_cache_entry(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_named(("ALPHA1", "P1"), ("ZULU1", "P2"))
+
+    assert await components(client, headers, q="alpha") == {"ALPHA1"}  # primes the cache for q=alpha
+    assert await components(client, headers, q="zulu") == {"ZULU1"}
+    assert await components(client, headers, priority="P2") == {"ZULU1"}
+    assert await components(client, headers) == {"ALPHA1", "ZULU1"}
+    assert await components(client, headers, q="alpha") == {"ALPHA1"}  # and the cached page is still right
+
+
+async def test_assignee_me_cache_is_per_user(client, make_user):
+    a, b = await make_user("sre"), await make_user("sre")
+    hdr = lambda u: {"Authorization": "Bearer " + create_access_token({"sub": u["id"], "role": "sre", "tv": 0})}
+    ids = await make_named(("FOR_A", "P1"), ("FOR_B", "P1"))
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(WorkItem).where(WorkItem.id == ids["FOR_A"]).values(assignee_id=a["id"]))
+        await db.execute(update(WorkItem).where(WorkItem.id == ids["FOR_B"]).values(assignee_id=b["id"]))
+        await db.commit()
+
+    assert await components(client, hdr(a), assignee="me") == {"FOR_A"}
+    assert await components(client, hdr(b), assignee="me") == {"FOR_B"}

@@ -13,11 +13,11 @@ from sqlalchemy import and_, or_, select, func, tuple_, update, literal_column, 
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import selectinload
 
-from app.db.postgres import ACTIVE_WHERE, WorkItem, RCARecord, Comment, Signal, User
+from app.db.postgres import ACTIVE_WHERE, WorkItem, WorkItemEvent, RCARecord, Comment, Signal, User
 from app.db import cache
 from app.models.schemas import (
     WorkItemCreate, WorkItemResponse, RCASubmit, RCAResponse,
-    CommentCreate, CommentResponse, MTTRStats, SLAStats
+    CommentCreate, CommentResponse, MTTRStats, SLAStats, WorkItemEventResponse
 )
 from app.services.alert_strategy import get_alert_strategy
 from app.services.state_machine import get_state, InvalidTransitionError
@@ -58,6 +58,17 @@ def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
         created_at=wi.created_at,
         updated_at=wi.updated_at,
     )
+
+
+def record_event(
+    db: AsyncSession, wi_id: str, kind: str, actor_id: str | None = None,
+    from_value: str | None = None, to_value: str | None = None,
+) -> None:
+    """Queue a history row on the caller's session. It commits (or rolls back) with the change it records."""
+    db.add(WorkItemEvent(
+        id=str(uuid.uuid4()), work_item_id=wi_id, kind=kind, actor_id=actor_id,
+        from_value=from_value, to_value=to_value, created_at=_now(),
+    ))
 
 
 async def create_work_item(data: WorkItemCreate, db: AsyncSession) -> str:
@@ -165,10 +176,18 @@ def _decode_cursor(cursor: str) -> tuple[str, datetime, str]:
         raise ValueError("Invalid cursor") from None
 
 
+def _like_escape(q: str) -> str:
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def list_work_items(
-    db: AsyncSession, status: str | None = None, limit: int = 100, cursor: str | None = None
+    db: AsyncSession, status: str | None = None, limit: int = 100, cursor: str | None = None,
+    q: str | None = None, priority: str | None = None, assignee: str | None = None,
 ) -> dict:
     """One page, ordered priority then newest first then id: {"items": [...], "next_cursor": str | None}.
+
+    Filters: `q` is a literal, case-insensitive substring of the component; `assignee` is a user id or
+    "none" (unassigned). The router has already validated them and resolved "me" to the caller's id.
 
     Keyset pagination: the cursor is the last row's sort key, so pages stay stable while incidents
     are created. Pages are cached under a generation counter that every write bumps (no KEYS scan).
@@ -177,21 +196,29 @@ async def list_work_items(
     after = _decode_cursor(cursor) if cursor else None  # validated before the cache, so a bad cursor is always 422
 
     gen = await cache.get_val("wi:list:gen") or 0
-    cache_key = f"wi:list:{gen}:{status or 'all'}:{limit}:{cursor or ''}"
+    cache_key = f"wi:list:{gen}:{status or 'all'}:{limit}:{cursor or ''}:{priority or ''}:{assignee or ''}:{q or ''}"
     cached = await cache.get_val(cache_key)
     if cached:
         return cached
 
-    q = select(WorkItem).options(selectinload(WorkItem.assignee))
+    stmt = select(WorkItem).options(selectinload(WorkItem.assignee))
     if status:
-        q = q.where(WorkItem.status == status)
+        stmt = stmt.where(WorkItem.status == status)
+    if priority:
+        stmt = stmt.where(WorkItem.priority == priority)
+    if assignee == "none":
+        stmt = stmt.where(WorkItem.assignee_id.is_(None))
+    elif assignee:
+        stmt = stmt.where(WorkItem.assignee_id == assignee)
+    if q:
+        stmt = stmt.where(WorkItem.component.ilike(f"%{_like_escape(q)}%", escape="\\"))
     if after:
         p, c, i = after
-        q = q.where(or_(WorkItem.priority > p,
-                        and_(WorkItem.priority == p, tuple_(WorkItem.created_at, WorkItem.id) < tuple_(c, i))))
-    q = q.order_by(WorkItem.priority, WorkItem.created_at.desc(), WorkItem.id.desc()).limit(limit + 1)
+        stmt = stmt.where(or_(WorkItem.priority > p,
+                              and_(WorkItem.priority == p, tuple_(WorkItem.created_at, WorkItem.id) < tuple_(c, i))))
+    stmt = stmt.order_by(WorkItem.priority, WorkItem.created_at.desc(), WorkItem.id.desc()).limit(limit + 1)
 
-    rows = (await db.execute(q)).scalars().all()
+    rows = (await db.execute(stmt)).scalars().all()
     page = {
         "items": [_wi_to_response(wi).model_dump(mode="json") for wi in rows[:limit]],
         "next_cursor": _encode_cursor(rows[limit - 1]) if len(rows) > limit else None,
@@ -208,7 +235,9 @@ async def _load_response(wi_id: str, db: AsyncSession) -> WorkItemResponse:
     return _wi_to_response(wi)
 
 
-async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> WorkItemResponse:
+async def transition_status(
+    wi_id: str, new_status: str, db: AsyncSession, actor_id: str | None = None
+) -> WorkItemResponse:
     """Move a Work Item through the state machine with a compare-and-set UPDATE.
 
     The write applies only if the status is still the one we validated against (and, for CLOSED,
@@ -231,18 +260,26 @@ async def transition_status(wi_id: str, new_status: str, db: AsyncSession) -> Wo
             raise ConflictError(f"Work item moved to {latest} while this request was in flight.")
         raise ValueError(target.guard_message)
 
+    record_event(db, wi_id, "status", actor_id, current, new_status)  # same transaction as the UPDATE
     await db.commit()
     await invalidate_cache(wi_id)
     return await _load_response(wi_id, db)
 
 
-async def assign_work_item(wi_id: str, assignee_id: str | None, db: AsyncSession) -> WorkItemResponse:
+async def assign_work_item(
+    wi_id: str, assignee_id: str | None, db: AsyncSession, actor_id: str | None = None
+) -> WorkItemResponse:
     result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id))
     wi = result.scalar_one_or_none()
     if not wi:
         raise ValueError(f"Work item {wi_id} not found")
-    if assignee_id is not None and await db.get(User, assignee_id) is None:
+    new_owner = await db.get(User, assignee_id) if assignee_id is not None else None
+    if assignee_id is not None and new_owner is None:
         raise ValueError("Assignee not found")  # 422 instead of a foreign-key 500 at commit
+    if wi.assignee_id != assignee_id:
+        old_owner = await db.get(User, wi.assignee_id) if wi.assignee_id else None
+        record_event(db, wi_id, "assigned", actor_id,
+                     old_owner.username if old_owner else None, new_owner.username if new_owner else None)
     wi.assignee_id = assignee_id
     wi.updated_at = _now()
     await db.commit()
@@ -297,6 +334,7 @@ async def submit_rca(wi_id: str, data: RCASubmit, db: AsyncSession, user_id: str
     wi.mttr_seconds = int((now - wi.start_time).total_seconds())
     wi.updated_at = now
 
+    record_event(db, wi_id, "rca_submitted", user_id)
     await db.commit()
     await invalidate_cache(wi_id)
     return RCAResponse(
@@ -363,6 +401,22 @@ async def list_comments(wi_id: str, db: AsyncSession) -> list[CommentResponse]:
             body=c.body, created_at=c.created_at,
         )
         for c in result.scalars().all()
+    ]
+
+
+async def list_history(wi_id: str, db: AsyncSession) -> list[WorkItemEventResponse]:
+    """The incident's events, oldest first."""
+    rows = (await db.execute(
+        select(WorkItemEvent).options(selectinload(WorkItemEvent.actor))
+        .where(WorkItemEvent.work_item_id == wi_id)
+        .order_by(WorkItemEvent.created_at, WorkItemEvent.id)
+    )).scalars().all()
+    return [
+        WorkItemEventResponse(
+            id=e.id, kind=e.kind, from_value=e.from_value, to_value=e.to_value,
+            actor_username=e.actor.username if e.actor else None, created_at=e.created_at,
+        )
+        for e in rows
     ]
 
 

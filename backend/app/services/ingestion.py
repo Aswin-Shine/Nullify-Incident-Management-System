@@ -17,7 +17,8 @@ from app.db.nosql import append_signal
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg
 from app.db.retry import with_db_retry
 from app.services import webhooks
-from app.services.work_item_service import invalidate_cache, upsert_active_work_item
+from app.services.work_item_service import invalidate_cache, record_event, upsert_active_work_item
+from app.services.ws_manager import manager
 
 logger = logging.getLogger("ims.ingestion")
 settings = get_settings()
@@ -67,6 +68,8 @@ async def _persist(component: str, record: dict, occurred: datetime, received: d
             db, component, occurred, record.get("signal_type") or "FAILURE", record.get("message") or "",
             record.get("component_type"),
         )
+        if wi.created:
+            record_event(db, wi.id, "created", None, None, wi.priority)
         db.add(Signal(
             work_item_id=wi.id, component=component, signal_type=record.get("signal_type") or "FAILURE",
             severity=record.get("severity"), message=record.get("message") or "", payload=record,
@@ -110,6 +113,9 @@ async def process_signal(signal: dict) -> str | None:
             "id": wi.id, "component": wi.component, "priority": wi.priority,
             "title": wi.title, "description": wi.description, "component_type": record.get("component_type"),
         }))
+        await manager.broadcast({
+            "event": "work_item_created", "id": wi.id, "component": wi.component, "priority": wi.priority,
+        })
         logger.info("Work item %s opened for %s", wi.id, component)
 
     wi_id = wi.id if wi is not None else None
