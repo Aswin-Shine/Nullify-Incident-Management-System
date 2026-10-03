@@ -8,6 +8,7 @@ import {
   fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers, errorMessage,
 } from '../api/client';
 import { useAuth, canWrite } from '../context/auth';
+import { useToast } from '../context/toast';
 import { useQuery } from '../hooks/useQuery';
 import { useNow } from '../hooks/useNow';
 import { avatarColor, fmtMTTR } from '../format';
@@ -31,7 +32,7 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
   const write = canWrite(user);
   const [signalsOpen, setSignalsOpen] = useState(false);
   const [transitioning, setTransit] = useState(null);
-  const [actionError, setActionError] = useState('');
+  const toast = useToast();
 
   const wi = useQuery(id, () => fetchWorkItem(id), refreshTick);
   const signals = useQuery(id, () => fetchSignals(id), refreshTick);
@@ -40,18 +41,19 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
   const users = useQuery(write ? 'users' : null, listUsers);
 
   // A mutation returns the updated work item, so render it instead of refetching.
-  const mutate = async (call) => {
-    setActionError('');
+  const mutate = async (call, successMessage) => {
     try {
-      wi.setData(await call());
+      const updated = await call();
+      wi.setData(updated);
+      toast(successMessage(updated));
       onRefresh?.();
     } catch (e) {
-      setActionError(errorMessage(e, 'Action failed'));
+      toast(errorMessage(e, 'Action failed'), { kind: 'error' });
     }
   };
   const doTransition = async (status) => {
     setTransit(status);
-    await mutate(() => updateStatus(id, status));
+    await mutate(() => updateStatus(id, status), updated => `Moved to ${updated.status}`);
     setTransit(null);
   };
 
@@ -104,7 +106,9 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
           )}
           {write ? (
             <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''}
-              onChange={e => mutate(() => assignWorkItem(id, e.target.value || null))}>
+              onChange={e => mutate(
+                () => assignWorkItem(id, e.target.value || null),
+                updated => updated.assignee_username ? `Assigned to ${updated.assignee_username}` : 'Incident unassigned')}>
               <option value="">Unassigned</option>
               {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
                 <option value={incident.assignee_id}>{incident.assignee_username}</option>
@@ -132,7 +136,6 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
             })}
           </div>
         )}
-        {actionError && <ErrorNote>{actionError}</ErrorNote>}
       </div>
 
       <div className="signals">
@@ -160,8 +163,8 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
       <hr className="divider" />
       <div className="detail-section">
         {!rca.loading && (
-          <RCAForm workItem={incident} rca={rca.data} readOnly={!write}
-            onSuccess={(created) => { rca.setData(created); onRefresh?.(); }} />
+          <RCAForm key={incident.id} workItem={incident} rca={rca.data} readOnly={!write}
+            onSuccess={(created) => { rca.setData(created); toast('RCA submitted'); onRefresh?.(); }} />
         )}
       </div>
       <hr className="divider" />

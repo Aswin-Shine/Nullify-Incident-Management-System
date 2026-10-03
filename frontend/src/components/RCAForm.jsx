@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { submitRCA, errorMessage } from '../api/client';
+import { toLocalInput, rcaToMarkdown } from '../format';
 import { ErrorNote } from './ErrorNote';
 import { Field } from './Field';
 
@@ -21,11 +22,25 @@ const ReadVal = ({ label, value }) => (
   </div>
 );
 
-const EMPTY = { incident_start: '', incident_end: '', root_cause_category: CATEGORIES[0], fix_applied: '', prevention_steps: '' };
+// The impact window starts as the incident's own first and last signal times; the SRE adjusts it.
+const initialForm = (wi) => ({
+  incident_start: toLocalInput(wi.start_time),
+  incident_end: toLocalInput(wi.last_signal_at ?? wi.start_time),
+  root_cause_category: CATEGORIES[0], fix_applied: '', prevention_steps: '',
+});
+
+function downloadMarkdown(wi, rca) {
+  const url = URL.createObjectURL(new Blob([rcaToMarkdown(wi, rca)], { type: 'text/markdown' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rca-${wi.component.replace(/[^A-Za-z0-9_.-]/g, '_')}-${new Date().toISOString().slice(0, 10)}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // `rca` is the submitted RCA (or null); the parent owns fetching it. `readOnly` hides the form from viewers.
 export function RCAForm({ workItem, rca, onSuccess, readOnly = false }) {
-  const [formData, setFormData] = useState(EMPTY);
+  const [formData, setFormData] = useState(() => initialForm(workItem));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const set = (key) => (e) => setFormData({ ...formData, [key]: e.target.value });
@@ -60,7 +75,12 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false }) {
           <span className="rca-mark">◈</span>
           <h3>Root Cause Analysis</h3>
         </div>
-        {rca && <span className="chip submitted" data-level="p3">✓ Submitted</span>}
+        {rca && (
+          <div className="rca-actions">
+            <button type="button" className="pill" onClick={() => downloadMarkdown(workItem, rca)}>Export Markdown</button>
+            <span className="chip submitted" data-level="p3">✓ Submitted</span>
+          </div>
+        )}
       </div>
 
       {rca ? (
@@ -84,6 +104,7 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false }) {
               {id => <input id={id} type="datetime-local" required value={formData.incident_end} onChange={set('incident_end')} />}
             </Field>
           </div>
+          <p className="muted-sm rca-hint">Pre-filled from the first and last signal. Adjust if needed.</p>
           <Field label="Root Cause Category">
             {id => (
               <select id={id} value={formData.root_cause_category} onChange={set('root_cause_category')}>

@@ -1,12 +1,13 @@
 import { render, act } from '@testing-library/react'
 import * as api from '../api/client'
 import { AuthProvider } from '../context/AuthContext'
+import { ToastProvider } from '../components/Toaster'
 
 // The calling test file must mock '../api/client' with a refreshSession mock (AuthProvider restores the
 // session through it). Renders under a real AuthProvider signed in with the given role (plus any extra user fields).
 export async function renderAs(role, ui, userExtra = {}) {
   api.refreshSession.mockResolvedValue({ user: { id: 'u1', username: 'me', role, ...userExtra } })
-  const wrap = (node) => <AuthProvider>{node}</AuthProvider>
+  const wrap = (node) => <AuthProvider><ToastProvider>{node}</ToastProvider></AuthProvider>
   const result = render(wrap(ui))
   await act(async () => { await new Promise(r => setTimeout(r, 0)) })
   return { ...result, rerender: (next) => result.rerender(wrap(next)) }

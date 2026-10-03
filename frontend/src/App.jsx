@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { AuthProvider } from './context/AuthContext';
 import { useAuth, canWrite } from './context/auth';
 import { LoginPage } from './components/LoginPage';
@@ -10,27 +10,64 @@ import { AnalyticsPanel } from './components/AnalyticsPanel';
 import { AccountPanel } from './components/AccountPanel';
 import { UsersPanel } from './components/UsersPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ToastProvider } from './components/Toaster';
+import { useToast } from './context/toast';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useCoalesced } from './hooks/useCoalesced';
+import { useUrlParam } from './hooks/useUrlParam';
 import { avatarColor } from './format';
 
 function Dashboard() {
   const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState('incidents');
-  const [selectedId, setSelectedId] = useState(null);
+  // The open incident lives in the URL (?incident=<id>), so reload, Back and a pasted link all work.
+  const [selectedId, setSelectedId] = useUrlParam('incident');
+  const toast = useToast();
+  const [unseenP0, setUnseenP0] = useState(0);
+  const baseTitle = useRef(document.title);
   const [refreshTick, setRefreshTick] = useState(0);
   const [liveEvents, setLiveEvents] = useState([]);
   const refresh = useCallback(() => setRefreshTick(t => t + 1), []);
   // A burst of WebSocket events becomes one refetch per second instead of one per event.
   const refreshOnEvent = useCoalesced(refresh, 1000);
 
+  const select = useCallback((id) => { setSelectedId(id); setActiveTab('incidents'); }, [setSelectedId]);
+
+  // A new P0 gets a toast, plus a title badge and a desktop notification while the tab is in the background.
+  const alertP0 = (msg) => {
+    const text = `New P0: ${msg.component}`;
+    toast(text, { kind: 'alert', action: { label: 'Open', onClick: () => select(msg.id) } });
+    if (!document.hidden) return;
+    setUnseenP0(n => n + 1);
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(text, { body: 'Click to open the incident.', tag: msg.id });
+        n.onclick = () => { window.focus(); select(msg.id); n.close?.(); };
+      } catch { /* some browsers only allow notifications from a service worker */ }
+    }
+  };
+
+  useEffect(() => {
+    const base = baseTitle.current;
+    document.title = unseenP0 ? `(${unseenP0}) ${base}` : base;
+    return () => { document.title = base; };
+  }, [unseenP0]);
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) setUnseenP0(0); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   useWebSocket((msg) => {
     refreshOnEvent();
+    if (msg.event === 'work_item_created' && msg.priority === 'P0') alertP0(msg);
     const label =
       msg.event === 'signal_ingested'   ? `signal → ${msg.component}` :
       msg.event === 'work_item_updated'  ? `status → ${msg.status}` :
       msg.event === 'rca_submitted'      ? 'RCA submitted' :
-      msg.event === 'comment_added'      ? 'comment added' : msg.event;
+      msg.event === 'comment_added'      ? 'comment added' :
+      msg.event === 'work_item_assigned' ? 'assignment changed' :
+      msg.event === 'work_item_created'  ? `new ${msg.priority} ${msg.component}` : msg.event;
     setLiveEvents(ev => [label, ...ev].slice(0, 5));
   });
 
@@ -73,7 +110,7 @@ function Dashboard() {
       <main className="main">
         {activeTab === 'incidents' && (
           <>
-            <IncidentList onSelect={setSelectedId} selectedId={selectedId} refreshTick={refreshTick} />
+            <IncidentList onSelect={select} selectedId={selectedId} refreshTick={refreshTick} />
             <div className="pane">
               <ErrorBoundary resetKey={selectedId}>
                 <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} />
@@ -115,7 +152,9 @@ function Dashboard() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppInner />
+      <ToastProvider>
+        <AppInner />
+      </ToastProvider>
     </AuthProvider>
   );
 }

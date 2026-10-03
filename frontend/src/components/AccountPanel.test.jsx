@@ -12,6 +12,7 @@ vi.mock('../api/client', async (orig) => ({
 beforeEach(() => {
   vi.resetAllMocks()
 })
+afterEach(() => { vi.unstubAllGlobals() })
 
 const NEW_PW = 'a-brand-new-passphrase'
 
@@ -76,4 +77,20 @@ test('Generate key shows the key once in a read-only field, and Copy writes it t
   expect(screen.getByText(/will not be shown again/i)).toBeTruthy()
   await userEvent.click(screen.getByRole('button', { name: 'Copy' }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith('nlfy_secret_key_123'))
+})
+
+test('Enable desktop alerts asks the browser for permission and shows the result', async () => {
+  const requestPermission = vi.fn().mockResolvedValue('granted')
+  vi.stubGlobal('Notification', { permission: 'default', requestPermission })
+  await renderAs('sre', <AccountPanel />)
+  expect(screen.getByText(/Permission: default/)).toBeTruthy()
+  await userEvent.click(screen.getByRole('button', { name: 'Enable desktop alerts' }))
+  expect(requestPermission).toHaveBeenCalledTimes(1)
+  expect(await screen.findByText(/Permission: granted/)).toBeTruthy()
+})
+
+test('the desktop alerts card is hidden when the browser has no Notification API', async () => {
+  vi.stubGlobal('Notification', undefined)
+  await renderAs('sre', <AccountPanel />)
+  expect(screen.queryByRole('button', { name: 'Enable desktop alerts' })).toBeNull()
 })

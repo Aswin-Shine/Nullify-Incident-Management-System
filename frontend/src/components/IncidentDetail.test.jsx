@@ -8,7 +8,7 @@ vi.mock('../api/client', async (orig) => ({
   ...(await orig()),
   refreshSession: vi.fn(), fetchWorkItem: vi.fn(), fetchSignals: vi.fn(), fetchRCA: vi.fn(),
   updateStatus: vi.fn(), assignWorkItem: vi.fn(), listUsers: vi.fn(), fetchComments: vi.fn(),
-  addComment: vi.fn(), submitRCA: vi.fn(),
+  addComment: vi.fn(), submitRCA: vi.fn(), fetchHistory: vi.fn(),
 }))
 
 beforeEach(() => {
@@ -17,6 +17,7 @@ beforeEach(() => {
   api.fetchSignals.mockResolvedValue([])
   api.fetchRCA.mockResolvedValue(null)
   api.fetchComments.mockResolvedValue([])
+  api.fetchHistory.mockResolvedValue([])
   api.listUsers.mockResolvedValue([{ id: 'u2', username: 'bob', role: 'sre' }])
 })
 
@@ -50,11 +51,43 @@ test('a viewer sees the assignee but no mutation controls and no user list call 
   expect(api.listUsers).not.toHaveBeenCalled()
 })
 
-test('a rejected transition shows the error (F-11)', async () => {
+test('a rejected transition shows an error toast with the server detail, not an inline note (F-11)', async () => {
   api.updateStatus.mockRejectedValue(httpError(409, 'Lost race'))
+  const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+  await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
+  const toast = (await screen.findByText(/Lost race/)).closest('.toast')
+  expect(toast).not.toBeNull()
+  expect(toast.dataset.kind).toBe('error')
+  expect(container.querySelector('.detail-card .error-note')).toBeNull()
+})
+
+test('a successful status change shows a success toast', async () => {
+  api.updateStatus.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
   await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
-  expect(await screen.findByText(/Lost race/)).toBeTruthy()
+  const toast = (await screen.findByText('Moved to INVESTIGATING')).closest('.toast')
+  expect(toast.dataset.kind).toBe('success')
+})
+
+test('assigning and unassigning show toasts', async () => {
+  api.assignWorkItem.mockResolvedValueOnce(workItem({ assignee_id: 'u2', assignee_username: 'bob' }))
+    .mockResolvedValueOnce(workItem())
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  const select = await screen.findByRole('combobox', { name: 'Assign to' })
+  await waitFor(() => expect(within(select).getByText(/bob/)).toBeTruthy())
+  await userEvent.selectOptions(select, 'u2')
+  expect(await screen.findByText('Assigned to bob')).toBeTruthy()
+  await userEvent.selectOptions(select, '')
+  expect(await screen.findByText('Incident unassigned')).toBeTruthy()
+})
+
+test('a failed assignment shows an error toast', async () => {
+  api.assignWorkItem.mockRejectedValue(httpError(422, 'Assignee not found'))
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  const select = await screen.findByRole('combobox', { name: 'Assign to' })
+  await waitFor(() => expect(within(select).getByText(/bob/)).toBeTruthy())
+  await userEvent.selectOptions(select, 'u2')
+  expect((await screen.findByText('Assignee not found')).closest('.toast').dataset.kind).toBe('error')
 })
 
 test('a successful transition renders the response without refetching (F-17)', async () => {
@@ -124,4 +157,17 @@ test('a viewer still sees the assignee as text, not a select', async () => {
   await renderAs('viewer', <IncidentDetail id="wi-1" />)
   expect(await screen.findByText('bob')).toBeTruthy()
   expect(screen.queryByRole('combobox', { name: 'Assign to' })).toBeNull()
+})
+
+test('switching incidents gives a fresh RCA form with that incident\'s own times (no carried-over text)', async () => {
+  const a = workItem({ id: 'wi-a', start_time: '2026-03-04T10:00:00.000Z', last_signal_at: '2026-03-04T10:30:00.000Z' })
+  const b = workItem({ id: 'wi-b', component: 'CACHE_B', start_time: '2026-03-05T08:00:00.000Z', last_signal_at: '2026-03-05T09:00:00.000Z' })
+  api.fetchWorkItem.mockImplementation(async (id) => (id === 'wi-a' ? a : b))
+  const { rerender } = await renderAs('sre', <IncidentDetail id="wi-a" />)
+  await userEvent.type(await screen.findByLabelText('Fix Applied'), 'typed for A')
+  expect(new Date(screen.getByLabelText('Impact Start').value).toISOString()).toBe(a.start_time)
+  rerender(<IncidentDetail id="wi-b" />)
+  await screen.findByRole('heading', { name: 'CACHE_B' })
+  await waitFor(() => expect(screen.getByLabelText('Fix Applied').value).toBe(''))
+  expect(new Date(screen.getByLabelText('Impact Start').value).toISOString()).toBe(b.start_time)
 })

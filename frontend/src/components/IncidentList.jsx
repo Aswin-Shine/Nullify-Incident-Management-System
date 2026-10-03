@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
+import { avatarColor } from '../format';
 import { fetchWorkItems, errorMessage } from '../api/client';
 import { useQuery } from '../hooks/useQuery';
 import { useNow } from '../hooks/useNow';
@@ -7,6 +8,8 @@ import { PriorityBadge, StatusBadge } from './Badges';
 import { ErrorNote } from './ErrorNote';
 
 const FILTERS = ['ALL', 'OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'];
+const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+const DEBOUNCE_MS = 300;
 const PAGE = 100;
 const MAX_LIMIT = 500;  // ponytail: past this, narrow with the status pills; API clients can walk next_cursor
 
@@ -16,12 +19,46 @@ const isCritical = i => i.priority === 'P0' && ['OPEN', 'INVESTIGATING'].include
 export function IncidentList({ onSelect, selectedId, refreshTick }) {
   const [filter, setFilter] = useState('ALL');
   const [limit, setLimit] = useState(PAGE);
-  // Keyed by filter only, so asking for more rows keeps the current ones on screen while it loads.
+  const [search, setSearch] = useState('');
+  const [q, setQ] = useState('');  // the debounced search that actually queries
+  const [priority, setPriority] = useState('');
+  const [mine, setMine] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => { setQ(search.trim()); setLimit(PAGE); }, DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Keyed by the filters only, so asking for more rows keeps the current ones on screen while it loads.
   const { data, error, loading } = useQuery(
-    filter, () => fetchWorkItems(filter === 'ALL' ? undefined : filter, limit), `${refreshTick}:${limit}`);
+    `${filter}|${q}|${priority}|${mine}`,
+    () => fetchWorkItems({
+      status: filter === 'ALL' ? undefined : filter, limit,
+      q: q || undefined, priority: priority || undefined, assignee: mine ? 'me' : undefined,
+    }),
+    `${refreshTick}:${limit}`);
+  const filtered = filter !== 'ALL' || q || priority || mine;
   const incidents = data?.items ?? [];
 
   const p0Count = incidents.filter(isCritical).length;
+
+  // j / k move through the rows, / jumps to search. Skipped while typing and when a modifier is held.
+  const searchRef = useRef(null);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+      if (e.key === '/') { e.preventDefault(); searchRef.current?.focus(); return; }
+      if (e.key !== 'j' && e.key !== 'k') return;
+      const rows = data?.items ?? [];
+      const at = rows.findIndex(i => i.id === selectedId);
+      const next = rows[e.key === 'j' ? at + 1 : at - 1];
+      if (!next) return;
+      onSelect(next.id);
+      document.querySelector(`[data-incident-id="${next.id}"]`)?.scrollIntoView?.({ block: 'nearest' });
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [data, selectedId, onSelect]);
 
   return (
     <div className="glass incident-list">
@@ -39,7 +76,22 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
             {f}
           </button>
         ))}
+        <button type="button" className="pill" aria-pressed={mine} onClick={() => { setMine(m => !m); setLimit(PAGE); }}>
+          Assigned to me
+        </button>
       </div>
+
+      <div className="filter-row">
+        <input ref={searchRef} type="search" name="q" aria-label="Search components" aria-keyshortcuts="/" placeholder="Search components" maxLength={64}
+          value={search} onChange={e => setSearch(e.target.value)} />
+        <select name="priority" aria-label="Priority" value={priority}
+          onChange={e => { setPriority(e.target.value); setLimit(PAGE); }}>
+          <option value="">All priorities</option>
+          {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+      </div>
+
+      <div className="muted-sm list-hint">j / k to move · / to search</div>
 
       <div className="list-body">
         {error && <ErrorNote>{errorMessage(error, 'Could not load incidents')}</ErrorNote>}
@@ -47,10 +99,10 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
           <div className="empty-state">
             <div className="empty-mark">∅</div>
             <div className="empty-title">No incidents</div>
-            <div className="empty-sub">{filter === 'ALL' ? 'All quiet, systems nominal.' : `No ${filter.toLowerCase()} incidents.`}</div>
+            <div className="empty-sub">{filtered ? 'No incidents match these filters.' : 'All quiet, systems nominal.'}</div>
           </div>
         ) : incidents.map(incident => (
-          <button type="button" key={incident.id} className="btn-bare incident-row"
+          <button type="button" key={incident.id} className="btn-bare incident-row" data-incident-id={incident.id}
             data-selected={incident.id === selectedId}
             data-p0={isCritical(incident)}
             onClick={() => onSelect(incident.id)}>
@@ -67,6 +119,16 @@ export function IncidentList({ onSelect, selectedId, refreshTick }) {
               <span className="row-main">
                 <StatusBadge status={incident.status} />
                 <span className="row-title">{incident.title || '-'}</span>
+              </span>
+              <span className="row-assignee">
+                {incident.assignee_username ? (
+                  <>
+                    <span className="avatar avatar-sm" style={{ background: avatarColor(incident.assignee_username) }} aria-hidden="true">
+                      {incident.assignee_username[0].toUpperCase()}
+                    </span>
+                    {incident.assignee_username}
+                  </>
+                ) : 'Unassigned'}
               </span>
               <span className="row-age">
                 {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}

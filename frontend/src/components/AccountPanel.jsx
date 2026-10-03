@@ -91,11 +91,29 @@ function ApiKeyCard() {
   );
 }
 
+// ponytail: no in-app preference store; the browser's own notification permission is the switch.
+function AlertsCard() {
+  const [permission, setPermission] = useState(Notification.permission);
+  const enable = async () => setPermission(await Notification.requestPermission());
+
+  return (
+    <section className="glass card panel-card">
+      <h2 className="card-title">Desktop alerts</h2>
+      <p className="muted">Get a browser notification when a new P0 opens while this tab is in the background.</p>
+      <p className="muted">Permission: {permission}{permission === 'denied' ? ' (change it in the browser site settings)' : ''}</p>
+      <button type="button" className="btn btn-primary" onClick={enable} disabled={permission !== 'default'}>
+        Enable desktop alerts
+      </button>
+    </section>
+  );
+}
+
 export function AccountPanel() {
   return (
     <div className="panel-page">
       <PasswordCard />
       <ApiKeyCard />
+      {typeof Notification !== 'undefined' && <AlertsCard />}
     </div>
   );
 }

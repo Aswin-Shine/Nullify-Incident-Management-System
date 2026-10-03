@@ -73,3 +73,15 @@ test('changePassword stores the returned access token for the next request', asy
   await client.api.get('/api/auth/me')
   expect(headers.at(-1)).toBe('Bearer fresh')
 })
+
+
+test('fetchWorkItems sends only the filters that are set, and fetchHistory hits the history route', async () => {
+  const { client } = await load()
+  const get = vi.spyOn(client.api, 'get').mockResolvedValue({ data: {} })
+  await client.fetchWorkItems({ status: 'OPEN', limit: 100, q: 'rdbms', priority: undefined, assignee: 'me' })
+  expect(get).toHaveBeenLastCalledWith('/api/work-items', { params: { status: 'OPEN', limit: 100, q: 'rdbms', assignee: 'me' } })
+  await client.fetchWorkItems({})
+  expect(get).toHaveBeenLastCalledWith('/api/work-items', { params: {} })
+  await client.fetchHistory('wi-1')
+  expect(get).toHaveBeenLastCalledWith('/api/work-items/wi-1/history')
+})

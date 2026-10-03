@@ -62,9 +62,12 @@ export const listUsers = () => api.get('/api/auth/users').then(r => r.data);
 
 // Work items
 // One page of incidents: { items, next_cursor }. The UI grows `limit` instead of walking cursors.
-export const fetchWorkItems = (status, limit) =>
-  api.get('/api/work-items', { params: { ...(status && { status }), ...(limit && { limit }) } }).then(r => r.data);
+export const fetchWorkItems = ({ status, limit, q, priority, assignee } = {}) =>
+  api.get('/api/work-items', {
+    params: { ...(status && { status }), ...(limit && { limit }), ...(q && { q }), ...(priority && { priority }), ...(assignee && { assignee }) },
+  }).then(r => r.data);
 export const fetchWorkItem = (id) => api.get(`/api/work-items/${id}`).then(r => r.data);
+export const fetchHistory = (id) => api.get(`/api/work-items/${id}/history`).then(r => r.data);
 export const fetchSignals = (id) => api.get(`/api/work-items/${id}/signals`).then(r => r.data);
 export const fetchRCA = (id) => api.get(`/api/work-items/${id}/rca`).then(r => r.data).catch(() => null);
 export const updateStatus = (id, new_status) =>
