@@ -72,7 +72,8 @@ async def timeseries(
         )
     else:
         result = await db.execute(
-            text("SELECT bucket, component, signal_count FROM timeseries_agg ORDER BY bucket DESC LIMIT :l"),
+            # One row per minute: the table keeps a row per (minute, component), which would draw a bar for each.
+            text("SELECT bucket, SUM(signal_count)::int AS signal_count FROM timeseries_agg GROUP BY bucket ORDER BY bucket DESC LIMIT :l"),
             {"l": limit},
         )
     return [dict(r._mapping) for r in result.all()]

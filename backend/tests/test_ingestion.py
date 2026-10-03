@@ -137,6 +137,29 @@ async def test_timeseries_counts_accumulate_per_bucket_and_component():
     assert sorted(tuple(r) for r in rows) == [("CACHE_A", 1, 5), ("QUEUE_B", 1, 2)]
 
 
+async def test_timeseries_endpoint_sums_components_per_minute_and_filters_by_component(client, make_headers):
+    """Regression: with no component the API returned one row per (minute, component), so the chart drew a bar for each."""
+    headers = await make_headers("viewer")
+    base = datetime.now(timezone.utc).replace(second=30, microsecond=0)
+    older, newer = base - timedelta(minutes=2), base - timedelta(minutes=1)
+    fmt = lambda t: t.strftime("%Y-%m-%dT%H:%M")
+    for _ in range(3):
+        await process_signal(sig("CACHE_A", ts=older))
+    for _ in range(2):
+        await process_signal(sig("QUEUE_B", ts=older))
+    await process_signal(sig("CACHE_A", ts=newer))
+
+    r = await client.get("/api/timeseries", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == [{"bucket": fmt(newer), "signal_count": 1}, {"bucket": fmt(older), "signal_count": 5}]
+
+    r = await client.get("/api/timeseries?component=CACHE_A", headers=headers)
+    assert r.json() == [
+        {"bucket": fmt(newer), "component": "CACHE_A", "signal_count": 1},
+        {"bucket": fmt(older), "component": "CACHE_A", "signal_count": 3},
+    ]
+
+
 async def test_alert_fires_once_per_new_incident_not_per_signal(mock_webhooks):
     for _ in range(10):
         await process_signal(sig("RDBMS_PRIMARY"))
