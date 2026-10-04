@@ -434,13 +434,71 @@ test('a pending confirm does not follow you to another incident', async () => {
   expect(screen.getByRole('button', { name: 'Close incident…' })).toBeTruthy()
 })
 
-test('Mark resolved hands the incident to onResolve and sends nothing itself', async () => {
-  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
-  const onResolve = vi.fn()
-  await renderAs('sre', <IncidentDetail id="wi-1" onResolve={onResolve} />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Mark resolved' }))
-  expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'wi-1', component: 'RDBMS_PRIMARY' }))
-  expect(api.updateStatus).not.toHaveBeenCalled()
+describe('resolution note', () => {
+  const investigating = () => api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
+  const noteBox = () => screen.getByRole('textbox', { name: 'How was it resolved?' })
+
+  test('Mark resolved asks how it was resolved, and submit stays disabled while the note is blank', async () => {
+    investigating()
+    const onResolve = vi.fn()
+    await renderAs('sre', <IncidentDetail id="wi-1" onResolve={onResolve} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark resolved' }))
+    expect(document.activeElement).toBe(noteBox())
+    const submit = screen.getByRole('button', { name: 'Mark resolved' })
+    expect(submit.disabled).toBe(true)
+    await userEvent.type(noteBox(), '   ')
+    expect(submit.disabled).toBe(true)
+    expect(onResolve).not.toHaveBeenCalled()
+  })
+
+  test('submitting hands the incident and the trimmed note to onResolve and sends nothing itself', async () => {
+    investigating()
+    const onResolve = vi.fn()
+    await renderAs('sre', <IncidentDetail id="wi-1" onResolve={onResolve} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark resolved' }))
+    await userEvent.type(noteBox(), '  Failed over to the replica  ')
+    await userEvent.click(screen.getByRole('button', { name: 'Mark resolved' }))
+    expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'wi-1', component: 'RDBMS_PRIMARY' }), 'Failed over to the replica')
+    expect(screen.queryByRole('textbox', { name: 'How was it resolved?' })).toBeNull()
+    expect(api.updateStatus).not.toHaveBeenCalled()
+  })
+
+  test.each([['Cancel'], ['Escape']])('%s closes the form, returns focus to Mark resolved, and keeps the draft', async (how) => {
+    investigating()
+    const onResolve = vi.fn()
+    await renderAs('sre', <IncidentDetail id="wi-1" onResolve={onResolve} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark resolved' }))
+    await userEvent.type(noteBox(), 'Restarted it')
+    if (how === 'Cancel') await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    else await userEvent.keyboard('{Escape}')
+    const opener = screen.getByRole('button', { name: 'Mark resolved' })
+    expect(document.activeElement).toBe(opener)
+    expect(onResolve).not.toHaveBeenCalled()
+    await userEvent.click(opener)
+    expect(noteBox().value).toBe('Restarted it')
+  })
+
+  test('askNote for this incident opens the form (the palette action)', async () => {
+    investigating()
+    const { rerender } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+    await screen.findByRole('button', { name: 'Mark resolved' })
+    rerender(<IncidentDetail id="wi-1" askNote={{ id: 'wi-2' }} />)
+    expect(screen.queryByRole('textbox', { name: 'How was it resolved?' })).toBeNull()
+    rerender(<IncidentDetail id="wi-1" askNote={{ id: 'wi-1' }} />)
+    expect(await screen.findByRole('textbox', { name: 'How was it resolved?' })).toBeTruthy()
+  })
+
+  test('a resolved incident shows its resolution note; one resolved before notes existed shows none', async () => {
+    api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', resolution_note: 'Failed over to the replica' }))
+    const { unmount } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+    expect(await screen.findByText('Failed over to the replica')).toBeTruthy()
+    expect(screen.getByText('Resolution')).toBeTruthy()
+    unmount()
+    api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', resolution_note: null }))
+    await renderAs('sre', <IncidentDetail id="wi-1" />)
+    await screen.findByRole('heading', { name: 'RDBMS_PRIMARY' })
+    expect(screen.queryByText('Resolution')).toBeNull()
+  })
 })
 
 test('while a resolve is pending the button reads Resolving and is disabled', async () => {

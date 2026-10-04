@@ -639,6 +639,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }  /*
 .close-confirm { display: flex; flex-direction: column; gap: 10px; align-items: flex-end; max-width: 100%; }
 .close-confirm p { font-size: 13px; color: var(--text-1); line-height: 1.4; text-align: right; }
 .close-confirm-actions { display: flex; gap: 8px; }
+.resolve-form { align-items: stretch; width: min(100%, 420px); }
+.resolve-form label { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.resolve-form textarea { width: 100%; min-height: 72px; }
+.resolve-form .close-confirm-actions { justify-content: flex-end; }
+.detail-resolution p { display: block; white-space: pre-wrap; -webkit-line-clamp: unset; line-clamp: unset; }
 .close-confirm-actions .btn { height: 32px; padding: 0 14px; }
 .transition-hint { margin-top: 8px; font-size: 12px; color: var(--text-3); text-align: right; }
 .transition-btn[data-blocked="true"] {

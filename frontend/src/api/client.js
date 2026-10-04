@@ -87,8 +87,9 @@ export const fetchRCA = (id) => api.get(`/api/work-items/${id}/rca`).then(r => r
   if (e.response?.status === 404) return null;
   throw e;
 });
-export const updateStatus = (id, new_status) =>
-  api.patch(`/api/work-items/${id}/status`, { new_status }).then(r => r.data);
+// RESOLVED needs `note` (how it was fixed); the other moves take none.
+export const updateStatus = (id, new_status, note) =>
+  api.patch(`/api/work-items/${id}/status`, note ? { new_status, note } : { new_status }).then(r => r.data);
 export const assignWorkItem = (id, assignee_id) =>
   api.patch(`/api/work-items/${id}/assign`, { assignee_id }).then(r => r.data);
 export const submitRCA = (id, data) => api.post(`/api/work-items/${id}/rca`, data).then(r => r.data);

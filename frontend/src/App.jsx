@@ -95,11 +95,11 @@ function Dashboard() {
 
   // Resolve waits 5 s so it can be undone. It lives here, not in the detail pane, so it survives switching incidents.
   const resolver = usePendingAction(RESOLVE_UNDO_MS);
-  const resolve = ({ id, component }) => {
+  const resolve = ({ id, component }, note) => {
     toast(`Resolving ${component} in 5 s`, { ttl: RESOLVE_UNDO_MS, action: { label: 'Undo', onClick: () => resolver.cancel(id) } });
     resolver.start(id, async () => {
       try {
-        await updateStatus(id, 'RESOLVED');
+        await updateStatus(id, 'RESOLVED', note);
         toast('Moved to RESOLVED');
       } catch (e) {
         toast(errorMessage(e, 'Action failed'), { kind: 'error' });
@@ -107,6 +107,9 @@ function Dashboard() {
       refresh();
     });
   };
+  // The palette cannot take the resolution note, so it asks the open pane to show its note form (a new object each time).
+  const [askNote, setAskNote] = useState(null);
+  const askResolve = ({ id }) => setAskNote({ id });
 
   // Palette actions on the open incident. Each ends in a refresh so the list and the pane show the new state.
   const startInvestigating = async (incident) => {
@@ -226,7 +229,7 @@ function Dashboard() {
       {paletteOpen && (
         <CommandPalette onClose={() => setPaletteOpen(false)} onGo={setActiveTab} onTheme={chooseTheme} onSelectIncident={select}
           activeTab={activeTab} theme={theme} incident={onPaletteIncident}
-          onStartInvestigating={startInvestigating} onAssignMe={assignMe} onResolve={resolve} onCopyLink={({ id }) => copyIncidentLink(id, toast)}
+          onStartInvestigating={startInvestigating} onAssignMe={assignMe} onResolve={askResolve} onCopyLink={({ id }) => copyIncidentLink(id, toast)}
           onNextCritical={nextCriticalId && nextCriticalId !== selectedId ? () => select(nextCriticalId) : undefined} />
       )}
 
@@ -250,7 +253,7 @@ function Dashboard() {
                 )}
                 <ErrorBoundary resetKey={selectedId}>
                   <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} onOpened={setOpenInfo} onClose={goBack}
-                    onResolve={resolve} resolving={!!resolver.pending[selectedId]} />
+                    onResolve={resolve} resolving={!!resolver.pending[selectedId]} askNote={askNote} />
                 </ErrorBoundary>
               </div>
             </div>

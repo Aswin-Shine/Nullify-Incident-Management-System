@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { Tabs } from '@heroui/react';
 import { PriorityBadge, StatusBadge } from './Badges';
@@ -82,10 +82,11 @@ function RcaLine({ incident }) {
   );
 }
 
-// `onResolve(incident)` starts the owner's undoable resolve; `resolving` says one is pending for this incident.
+// `onResolve(incident, note)` starts the owner's undoable resolve once the note form is filled; `resolving` says one is
+// pending for this incident. A new `askNote` ({ id }) object opens the note form when it names this incident (the palette).
 // `onOpened({ id, component, status, assignee_id })` reports the incident that loaded, for the list's note and the tab title.
 // `onClose` deselects the incident (the card's ✕; App also maps Escape to it).
-export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolving = false, onOpened, onClose }) {
+export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolving = false, onOpened, onClose, askNote }) {
   const { user } = useAuth();
   const write = canWrite(user);
   // The user's own tab choice and "Show all" for one incident; any other incident starts at the defaults for its status.
@@ -94,6 +95,17 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
   const [transitioning, setTransit] = useState(null);
   const [assigningId, setAssigningId] = useState(null);  // the incident whose assignment request is in flight
   const [confirmId, setConfirmId] = useState(null);  // the incident whose Close is awaiting confirmation
+  const [noteFor, setNoteFor] = useState(null);  // the incident whose resolution note form is open
+  const [draft, setDraft] = useState({ id: null, text: '' });  // kept after submit, so an undone resolve keeps its note
+  const [seenAsk, setSeenAsk] = useState(askNote);  // an ask already present at mount is old news
+  if (askNote !== seenAsk) {
+    setSeenAsk(askNote);
+    if (askNote?.id === id) setNoteFor(id);
+  }
+  const noteId = useId();
+  const noteRef = useRef(null);
+  const resolveRef = useRef(null);
+  const wasNoting = useRef(false);
   const cancelRef = useRef(null);
   const closeRef = useRef(null);
   const wasConfirming = useRef(false);
@@ -115,6 +127,13 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
     else if (wasConfirming.current && confirmId === null) closeRef.current?.focus();  // not when the user moved to another incident
     wasConfirming.current = confirming;
   }, [confirming, confirmId]);
+  // The same for the note form: the textarea when it opens, Mark resolved again when it is dismissed.
+  const noting = noteFor === id;
+  useEffect(() => {
+    if (noting) noteRef.current?.focus();
+    else if (wasNoting.current && noteFor === null) resolveRef.current?.focus();
+    wasNoting.current = noting;
+  }, [noting, noteFor]);
   // Below 900px the list is hidden once an incident is open, so the heading takes the focus.
   const loadedId = wi.data?.id;
   useEffect(() => { if (loadedId && window.innerWidth < 900) h1Ref.current?.focus(); }, [loadedId]);
@@ -178,6 +197,13 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
   const facts = [mttr && `MTTR ${mttr}`, category].filter(Boolean).join(' · ');
   const confirmText = `Close ${incident.component}?${facts ? ` ${facts}.` : ''} The RCA locks once closed.`;
   const transitions = write ? NEXT[incident.status] || [] : [];
+  const noteText = draft.id === id ? draft.text : '';
+  const submitNote = (e) => {
+    e.preventDefault();
+    if (!noteText.trim()) return;
+    setNoteFor(null);
+    onResolve?.(incident, noteText.trim());
+  };
   const closeBlocked = transitions.includes('CLOSED') && !rca.data;  // also while the RCA could not be loaded: we cannot tell
   const signalList = signals.data ?? [];
   const active = ACTIVE.includes(incident.status);
@@ -276,6 +302,12 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
             {finished && <div><dt>Resolved by</dt><dd>{actorOf('RESOLVED')}</dd></div>}
             {closed && <div><dt>Closed by</dt><dd>{actorOf('CLOSED')}</dd></div>}
           </dl>
+          {finished && incident.resolution_note && (
+            <div className="detail-latest detail-resolution">
+              <span className="micro">Resolution</span>
+              <p dir="auto">{incident.resolution_note}</p>
+            </div>
+          )}
           {latest && !closed && (
             <div className="detail-latest">
               <span className="micro">Latest</span>
@@ -313,7 +345,21 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
               )}
             </div>
 
-            {transitions.length > 0 && (confirming ? (
+            {transitions.length > 0 && (noting && transitions.includes('RESOLVED') ? (
+              // Escape cancels the form; the keys themselves land on the textarea and buttons inside it.
+              // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+              <form className="close-confirm resolve-form" onSubmit={submitNote}
+                onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setNoteFor(null); } }}>
+                <label htmlFor={noteId}>How was it resolved?</label>
+                <textarea id={noteId} ref={noteRef} rows={3} maxLength={4000} required value={noteText}
+                  placeholder="What fixed it, in a sentence or two. The RCA comes later."
+                  onChange={e => setDraft({ id, text: e.target.value })} />
+                <div className="close-confirm-actions">
+                  <button type="button" className="btn btn-secondary" onClick={() => setNoteFor(null)}>Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={!noteText.trim()}>Mark resolved</button>
+                </div>
+              </form>
+            ) : confirming ? (
               // An inline confirm, not a modal: Close is final, but nothing here needs protected focus.
               // eslint-disable-next-line jsx-a11y/no-static-element-interactions
               <div className="close-confirm" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setConfirmId(null); } }}>
@@ -337,8 +383,8 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
                   // Claiming comes first: while nobody owns an investigation, Assign to me leads and Resolve steps back.
                   const secondary = st === 'RESOLVED' && claimFirst;
                   return (
-                    <button type="button" key={st} ref={st === 'CLOSED' ? closeRef : undefined} className={`btn ${secondary ? 'btn-secondary' : 'btn-primary'} transition-btn`} data-to={st} data-blocked={blocked}
-                      onClick={() => st === 'CLOSED' ? setConfirmId(id) : st === 'RESOLVED' ? onResolve?.(incident) : doTransition(st, st === 'INVESTIGATING' ? started : undefined)}
+                    <button type="button" key={st} ref={st === 'CLOSED' ? closeRef : st === 'RESOLVED' ? resolveRef : undefined} className={`btn ${secondary ? 'btn-secondary' : 'btn-primary'} transition-btn`} data-to={st} data-blocked={blocked}
+                      onClick={() => st === 'CLOSED' ? setConfirmId(id) : st === 'RESOLVED' ? setNoteFor(id) : doTransition(st, st === 'INVESTIGATING' ? started : undefined)}
                       disabled={!!transitioning || blocked || pendingResolve}>
                       {transitioning === st ? <span className="spinner" /> : pendingResolve ? 'Resolving…' : TRANSITION_LABEL[st]}
                     </button>

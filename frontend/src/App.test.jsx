@@ -10,15 +10,16 @@ const mockDetail = vi.hoisted(() => ({ status: 'OPEN' }))  // the state the mock
 vi.mock('./components/IncidentDetail', async () => {
   const { useEffect } = await import('react')
   return {
-    IncidentDetail: ({ id, onResolve, resolving, onOpened, onClose }) => {
+    IncidentDetail: ({ id, onResolve, resolving, onOpened, onClose, askNote }) => {
       // The real pane reports the incident it loaded; here every id loads as an unowned incident named COMP_<id>, OPEN unless a test sets mockDetail.status.
       useEffect(() => { if (id) onOpened?.({ id, component: `COMP_${id}`, status: mockDetail.status, assignee_id: null }) }, [id, onOpened])
       return (
         <>
           <div data-testid="detail">{String(id)}</div>
-          <button type="button" onClick={() => onResolve({ id, component: 'RDBMS_X' })}>mock resolve</button>
+          <button type="button" onClick={() => onResolve({ id, component: 'RDBMS_X' }, 'Failed over')}>mock resolve</button>
           {id && <button type="button" onClick={onClose}>mock deselect</button>}
           {resolving && <span>mock resolving</span>}
+          {askNote?.id === id && <span>mock note asked</span>}
         </>
       )
     },
@@ -456,7 +457,7 @@ describe('Resolve with undo', () => {
     expect(api.updateStatus).not.toHaveBeenCalled()
     await wait(200)
     expect(api.updateStatus).toHaveBeenCalledTimes(1)
-    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED')
+    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED', 'Failed over')
     expect(screen.getByText('Moved to RESOLVED')).toBeTruthy()
     expect(screen.queryByText('mock resolving')).toBeNull()
   })
@@ -477,7 +478,7 @@ describe('Resolve with undo', () => {
     expect(screen.getByTestId('detail').textContent).toBe('other')
     expect(screen.queryByText('mock resolving')).toBeNull()  // the flag belongs to abc, not to this incident
     await wait(5100)
-    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED')
+    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED', 'Failed over')
   })
 
   test('a failed resolve shows an error toast', async () => {
@@ -608,11 +609,11 @@ describe('third critique: palette actions', () => {
     expect(await screen.findByText('Assigned to you')).toBeTruthy()
   })
 
-  test('Mark resolved goes through the 5 second undo, and nothing is sent yet', async () => {
+  test('Mark resolved asks the open pane for a resolution note, and nothing is sent yet', async () => {
     await atIncident('INVESTIGATING')
     await choose('Mark resolved COMP_abc')
-    expect(screen.getByText('Resolving COMP_abc in 5 s')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Undo' })).toBeTruthy()
+    expect(screen.getByText('mock note asked')).toBeTruthy()
+    expect(screen.queryByText('Resolving COMP_abc in 5 s')).toBeNull()
     expect(api.updateStatus).not.toHaveBeenCalled()
   })
 
