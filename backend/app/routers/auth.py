@@ -26,7 +26,9 @@ from app.db.postgres import get_db, User
 from app.models.schemas import (
     ApiKeyResponse, LoginRequest, PasswordChange, TokenResponse, UserCreate, UserPublic, UserResponse, UserUpdate,
 )
-from app.services.user_service import create_account
+from app.services.user_service import create_account, delete_account
+from app.services.work_item_service import invalidate_cache
+from app.services.ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 security_log = logging.getLogger("ims.security")
@@ -160,7 +162,7 @@ async def list_users(_: User = Depends(require_sre_or_admin), db: AsyncSession =
 @router.get("/accounts", response_model=list[UserResponse])
 async def list_accounts(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     """Every account, deactivated ones included, for the admin screen."""
-    rows = (await db.execute(select(User).order_by(User.username))).scalars().all()
+    rows = (await db.execute(select(User).where(User.deleted_at.is_(None)).order_by(User.username))).scalars().all()
     return [_user_resp(u) for u in rows]
 
 
@@ -199,3 +201,18 @@ async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(requ
         security_log.info("password_reset by=%s user=%s", admin.username, user.username)
     await db.commit()
     return _user_resp(user)
+
+
+@router.delete("/users/{user_id}", status_code=204)
+async def delete_user(user_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Delete an account. Their history stays, shown as "Deleted user"; their active incidents become unassigned."""
+    user = await db.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise HTTPException(404, "User not found")
+    if user.id == admin.id:
+        raise HTTPException(400, "You cannot delete your own account")
+    changed = await delete_account(db, user, admin)  # commits
+    for wi_id in changed:  # side effects only after the commit
+        await invalidate_cache(wi_id)
+        await ws_manager.broadcast({"event": "work_item_assigned", "id": wi_id})
+    return Response(status_code=204)

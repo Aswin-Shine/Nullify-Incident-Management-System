@@ -36,6 +36,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+DELETED_USER = "Deleted user"
+
+
+def display_name(user: User | None) -> str | None:
+    """The name to show for a person: "Deleted user" once an admin deleted the account (the row stays, anonymised)."""
+    if user is None:
+        return None
+    return DELETED_USER if user.deleted_at else user.username
+
+
 def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
     now = _now()
     sla_breached = bool(wi.sla_deadline and wi.status not in ("RESOLVED", "CLOSED") and now > wi.sla_deadline)
@@ -47,7 +57,7 @@ def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
         title=wi.title,
         description=wi.description,
         assignee_id=wi.assignee_id,
-        assignee_username=wi.assignee.username if wi.assignee else None,
+        assignee_username=display_name(wi.assignee),
         start_time=wi.start_time,
         end_time=wi.end_time,
         resolved_at=wi.resolved_at,
@@ -417,7 +427,7 @@ async def list_comments(wi_id: str, db: AsyncSession) -> list[CommentResponse]:
     return [
         CommentResponse(
             id=c.id, work_item_id=wi_id, author_id=c.author_id,
-            author_username=c.author.username if c.author else None,
+            author_username=display_name(c.author),
             body=c.body, created_at=c.created_at,
         )
         for c in result.scalars().all()
@@ -434,7 +444,7 @@ async def list_history(wi_id: str, db: AsyncSession) -> list[WorkItemEventRespon
     return [
         WorkItemEventResponse(
             id=e.id, kind=e.kind, from_value=e.from_value, to_value=e.to_value,
-            actor_username=e.actor.username if e.actor else None, created_at=e.created_at,
+            actor_username=display_name(e.actor), created_at=e.created_at,
         )
         for e in rows
     ]
@@ -492,6 +502,18 @@ async def get_sla_stats(db: AsyncSession) -> SLAStats:
         breach_rate_pct=round(breached / total * 100, 1) if total else 0.0,
         open_by_priority=open_by_priority,
     )
+
+
+async def unassign_from_active(db: AsyncSession, user: User, actor_id: str) -> list[str]:
+    """Unassign `user` from every OPEN or INVESTIGATING incident, with an "assigned" event each, on the caller's session
+    (no commit). Finished incidents keep their owner: that is history. Returns the ids that changed."""
+    ids = list((await db.execute(
+        update(WorkItem).where(WorkItem.assignee_id == user.id, WorkItem.status.in_(["OPEN", "INVESTIGATING"]))
+        .values(assignee_id=None, updated_at=_now()).returning(WorkItem.id)
+    )).scalars())
+    for wi_id in ids:
+        record_event(db, wi_id, "assigned", actor_id, user.username, None)
+    return ids
 
 
 async def invalidate_cache(wi_id: str | None = None):

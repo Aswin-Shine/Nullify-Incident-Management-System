@@ -134,6 +134,7 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # bump to revoke tokens
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set when an admin deletes the account
 
     assigned_incidents: Mapped[list[WorkItem]] = relationship(
         "WorkItem", back_populates="assignee", foreign_keys="WorkItem.assignee_id"
