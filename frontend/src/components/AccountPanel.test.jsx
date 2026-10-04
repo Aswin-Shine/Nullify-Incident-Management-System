@@ -94,3 +94,37 @@ test('the desktop alerts card is hidden when the browser has no Notification API
   await renderAs('sre', <AccountPanel />)
   expect(screen.queryByRole('button', { name: 'Enable desktop alerts' })).toBeNull()
 })
+
+describe('second critique: rotating an existing key', () => {
+  test('with a key, Generate asks first and nothing is rotated until it is confirmed', async () => {
+    api.rotateApiKey.mockResolvedValue({ api_key: 'nlfy_new_key' })
+    await renderAs('sre', <AccountPanel />, { has_api_key: true })
+    await userEvent.click(screen.getByRole('button', { name: 'Generate key' }))
+    expect(screen.getByText('This disables your current key. Producers using it will start getting 401.')).toBeTruthy()
+    expect(api.rotateApiKey).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Generate new key' }))
+    expect(api.rotateApiKey).toHaveBeenCalledTimes(1)
+    expect(await screen.findByDisplayValue('nlfy_new_key')).toBeTruthy()
+  })
+
+  test('Cancel dismisses the confirm without rotating', async () => {
+    await renderAs('sre', <AccountPanel />, { has_api_key: true })
+    await userEvent.click(screen.getByRole('button', { name: 'Generate key' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByText(/Producers using it/)).toBeNull()
+    expect(api.rotateApiKey).not.toHaveBeenCalled()
+  })
+
+  test('without a key, Generate rotates straight away', async () => {
+    api.rotateApiKey.mockResolvedValue({ api_key: 'nlfy_first' })
+    await renderAs('sre', <AccountPanel />)
+    await userEvent.click(screen.getByRole('button', { name: 'Generate key' }))
+    expect(api.rotateApiKey).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText(/Producers using it/)).toBeNull()
+  })
+
+  test('the page has a level-1 title', async () => {
+    await renderAs('sre', <AccountPanel />)
+    expect(screen.getByRole('heading', { level: 1, name: 'Account' })).toBeTruthy()
+  })
+})

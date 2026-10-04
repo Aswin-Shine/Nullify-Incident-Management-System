@@ -49,3 +49,14 @@ test('inputs have names so password managers can fill them', () => {
   expect(screen.getByLabelText('Username').getAttribute('name')).toBe('username')
   expect(screen.getByLabelText('Password').getAttribute('name')).toBe('password')
 })
+
+test('both inputs are required, so an empty submit never reaches the server', () => {
+  setup()
+  expect(screen.getByLabelText('Username').required).toBe(true)
+  expect(screen.getByLabelText('Password').required).toBe(true)
+})
+
+test('the password field has no bullet placeholder', () => {
+  setup()
+  expect(screen.getByLabelText('Password').getAttribute('placeholder')).toBeNull()
+})

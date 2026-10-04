@@ -1,16 +1,32 @@
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import * as api from './api/client'
 import { useWebSocket } from './hooks/useWebSocket'
 
 vi.mock('./hooks/useWebSocket', () => ({ useWebSocket: vi.fn() }))
+const mockDetail = vi.hoisted(() => ({ status: 'OPEN' }))  // the state the mocked pane reports for the open incident
 // The detail pane is covered in its own tests; here it only reports which incident it was given.
-vi.mock('./components/IncidentDetail', () => ({ IncidentDetail: ({ id }) => <div data-testid="detail">{String(id)}</div> }))
+vi.mock('./components/IncidentDetail', async () => {
+  const { useEffect } = await import('react')
+  return {
+    IncidentDetail: ({ id, onResolve, resolving, onOpened }) => {
+      // The real pane reports the incident it loaded; here every id loads as an unowned incident named COMP_<id>, OPEN unless a test sets mockDetail.status.
+      useEffect(() => { if (id) onOpened?.({ id, component: `COMP_${id}`, status: mockDetail.status, assignee_id: null }) }, [id, onOpened])
+      return (
+        <>
+          <div data-testid="detail">{String(id)}</div>
+          <button type="button" onClick={() => onResolve({ id, component: 'RDBMS_X' })}>mock resolve</button>
+          {resolving && <span>mock resolving</span>}
+        </>
+      )
+    },
+  }
+})
 vi.mock('./api/client', async (orig) => ({
   ...(await orig()),
   refreshSession: vi.fn(), fetchWorkItems: vi.fn(), fetchHealth: vi.fn(), listUsers: vi.fn(),
-  fetchMTTR: vi.fn(), fetchSLA: vi.fn(), fetchTimeseries: vi.fn(),
+  fetchMTTR: vi.fn(), fetchSLA: vi.fn(), fetchTimeseries: vi.fn(), updateStatus: vi.fn(), assignWorkItem: vi.fn(), logout: vi.fn(),
 }))
 
 afterEach(() => {
@@ -23,6 +39,7 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  mockDetail.status = 'OPEN'
   document.title = 'Nullify'
   api.fetchWorkItems.mockResolvedValue({ items: [], next_cursor: null })
   api.fetchHealth.mockResolvedValue({ status: 'ok' })
@@ -232,4 +249,451 @@ test('opening an incident from the palette selects it on the Incidents tab', asy
   await userEvent.click(await screen.findByRole('option', { name: /Open CACHE_5/ }, { timeout: 2000 }))
   expect(window.location.search).toBe('?incident=wi-5')
   expect(screen.getByRole('button', { name: 'Incidents' }).getAttribute('aria-current')).toBe('page')
+})
+
+test('the WebSocket reconnect callback refetches the incident list (F-35)', async () => {
+  await open('sre')
+  await screen.findByText('No incidents')
+  const before = api.fetchWorkItems.mock.calls.length
+  act(() => { useWebSocket.mock.calls.at(-1)[1]() })
+  await waitFor(() => expect(api.fetchWorkItems.mock.calls.length).toBe(before + 1))
+})
+
+test('a keydown without a key (browser autofill) neither throws nor opens the palette (F-36)', async () => {
+  await open('sre')
+  const errors = []
+  const onError = (e) => { errors.push(e.message); e.preventDefault() }
+  window.addEventListener('error', onError)
+  const event = new Event('keydown')
+  Object.defineProperty(event, 'ctrlKey', { value: true })
+  act(() => { document.dispatchEvent(event) })
+  window.removeEventListener('error', onError)
+  expect(errors).toEqual([])
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+})
+
+// ---- UX step 2: auto-select the top P0 ----
+
+const p0 = (over = {}) => ({ id: 'p0-1', component: 'RDBMS_P0', priority: 'P0', status: 'OPEN', title: 't', created_at: new Date().toISOString(), ...over })
+const p2 = (over = {}) => p0({ id: 'p2-1', component: 'CACHE_P2', priority: 'P2', ...over })
+
+test('with no ?incident= the top active P0 is opened on load, replacing the history entry', async () => {
+  api.fetchWorkItems.mockResolvedValue({ items: [p0(), p2()], next_cursor: null })
+  const push = vi.spyOn(window.history, 'pushState')
+  const replace = vi.spyOn(window.history, 'replaceState')
+  await open('sre')
+  await waitFor(() => expect(screen.getByTestId('detail').textContent).toBe('p0-1'))
+  expect(window.location.search).toBe('?incident=p0-1')
+  expect(replace).toHaveBeenCalled()
+  expect(push).not.toHaveBeenCalled()
+  push.mockRestore(); replace.mockRestore()
+})
+
+test('a P0 that is already resolved is not auto-opened', async () => {
+  api.fetchWorkItems.mockResolvedValue({ items: [p0({ status: 'RESOLVED' }), p2()], next_cursor: null })
+  await open('sre')
+  await screen.findByRole('button', { name: /CACHE_P2/ })
+  expect(screen.getByTestId('detail').textContent).toBe('null')
+})
+
+test('an incident already named in the URL is left alone', async () => {
+  window.history.replaceState(null, '', '/?incident=x')
+  api.fetchWorkItems.mockResolvedValue({ items: [p0()], next_cursor: null })
+  await open('sre')
+  await screen.findByRole('button', { name: /RDBMS_P0/ })
+  expect(screen.getByTestId('detail').textContent).toBe('x')
+})
+
+test('auto-select happens once per page load: after Back it does not reopen', async () => {
+  api.fetchWorkItems.mockResolvedValue({ items: [p0()], next_cursor: null })
+  await open('sre')
+  await waitFor(() => expect(screen.getByTestId('detail').textContent).toBe('p0-1'))
+  await userEvent.click(screen.getByRole('button', { name: 'Back to incidents' }))
+  expect(screen.getByTestId('detail').textContent).toBe('null')
+  await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Incidents' }))
+  await screen.findByRole('button', { name: /RDBMS_P0/ })
+  expect(screen.getByTestId('detail').textContent).toBe('null')
+})
+
+test('on a phone-width window the list stays up and nothing is auto-opened', async () => {
+  vi.stubGlobal('innerWidth', 390)
+  api.fetchWorkItems.mockResolvedValue({ items: [p0()], next_cursor: null })
+  await open('sre')
+  await screen.findByRole('button', { name: /RDBMS_P0/ })
+  expect(screen.getByTestId('detail').textContent).toBe('null')
+})
+
+// ---- UX step 3: persistent alerts, health label, resolve undo ----
+
+test('a new P0 shows a "1 new P0" strip button that opens it and then goes away', async () => {
+  await open('sre')
+  expect(screen.queryByRole('button', { name: /new P0/ })).toBeNull()
+  emit(created())
+  await userEvent.click(await screen.findByRole('button', { name: '1 new P0' }))
+  expect(screen.getByTestId('detail').textContent).toBe('new-1')
+  expect(screen.queryByRole('button', { name: /new P0/ })).toBeNull()
+})
+
+test('the strip opens the oldest unopened P0 first, and opening one from the toast clears it from the count', async () => {
+  await open('sre')
+  emit(created({ id: 'a', component: 'A_DB' }))
+  emit(created({ id: 'b', component: 'B_DB' }))
+  const strip = await screen.findByRole('button', { name: '2 new P0' })
+  await userEvent.click(strip)
+  expect(screen.getByTestId('detail').textContent).toBe('a')
+  expect(screen.getByRole('button', { name: '1 new P0' })).toBeTruthy()
+})
+
+test('a P1 does not count as a new P0', async () => {
+  await open('sre')
+  emit(created({ priority: 'P1' }))
+  expect(screen.queryByRole('button', { name: /new P0/ })).toBeNull()
+})
+
+test('an alert toast is still there after 15 seconds', async () => {
+  await open('sre')
+  vi.useFakeTimers()
+  try {
+    emit(created())
+    act(() => { vi.advanceTimersByTime(15_000) })
+    expect(screen.getByRole('alert').textContent).toContain('New P0: RDBMS_X')
+  } finally { vi.useRealTimers() }
+})
+
+test('with desktop alerts undecided and a P0 waiting the strip offers to enable them', async () => {
+  const request = vi.fn().mockResolvedValue('granted')
+  class FakeNotification { static permission = 'default'; static requestPermission = request }
+  vi.stubGlobal('Notification', FakeNotification)
+  await open('sre')
+  expect(screen.queryByRole('button', { name: 'Enable desktop alerts' })).toBeNull()  // nothing waiting yet
+  emit(created())
+  await userEvent.click(await screen.findByRole('button', { name: 'Enable desktop alerts' }))
+  expect(request).toHaveBeenCalledTimes(1)
+})
+
+test('once permission is decided the enable button is not shown', async () => {
+  class FakeNotification { static permission = 'granted' }
+  vi.stubGlobal('Notification', FakeNotification)
+  await open('sre')
+  emit(created())
+  await screen.findByRole('button', { name: '1 new P0' })
+  expect(screen.queryByRole('button', { name: 'Enable desktop alerts' })).toBeNull()
+})
+
+test.each([
+  [{ status: 'ok' }, 'API OK'],
+  [{ status: 'degraded' }, 'API DEGRADED'],
+])('the strip reads %j as %s', async (health, label) => {
+  api.fetchHealth.mockResolvedValue(health)
+  await open('sre')
+  expect(await screen.findByText(label)).toBeTruthy()
+})
+
+test('an unreachable health endpoint reads API UNREACHABLE', async () => {
+  api.fetchHealth.mockRejectedValue(new Error('down'))
+  await open('sre')
+  expect(await screen.findByText('API UNREACHABLE')).toBeTruthy()
+})
+
+describe('Resolve with undo', () => {
+  // The session restore needs real timers; the 5 s window is then driven by fake ones.
+  const resolveNow = async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'mock resolve' }))
+  }
+  const wait = (ms) => act(async () => { vi.advanceTimersByTime(ms) })
+  afterEach(() => { vi.useRealTimers() })
+
+  test('nothing is sent until 5 seconds are up, then it is sent once', async () => {
+    api.updateStatus.mockResolvedValue({ status: 'RESOLVED' })
+    await resolveNow()
+    expect(screen.getByText('Resolving RDBMS_X in 5 s')).toBeTruthy()
+    expect(screen.getByText('mock resolving')).toBeTruthy()
+    await wait(4900)
+    expect(api.updateStatus).not.toHaveBeenCalled()
+    await wait(200)
+    expect(api.updateStatus).toHaveBeenCalledTimes(1)
+    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED')
+    expect(screen.getByText('Moved to RESOLVED')).toBeTruthy()
+    expect(screen.queryByText('mock resolving')).toBeNull()
+  })
+
+  test('Undo before then means it is never sent', async () => {
+    await resolveNow()
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
+    expect(screen.queryByText('Resolving RDBMS_X in 5 s')).toBeNull()
+    expect(screen.queryByText('mock resolving')).toBeNull()
+    await wait(10_000)
+    expect(api.updateStatus).not.toHaveBeenCalled()
+  })
+
+  test('the pending resolve survives switching to another incident', async () => {
+    api.updateStatus.mockResolvedValue({ status: 'RESOLVED' })
+    await resolveNow()
+    act(() => { window.history.pushState(null, '', '/?incident=other'); window.dispatchEvent(new PopStateEvent('popstate')) })
+    expect(screen.getByTestId('detail').textContent).toBe('other')
+    expect(screen.queryByText('mock resolving')).toBeNull()  // the flag belongs to abc, not to this incident
+    await wait(5100)
+    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'RESOLVED')
+  })
+
+  test('a failed resolve shows an error toast', async () => {
+    api.updateStatus.mockRejectedValue({ response: { status: 409, data: { detail: 'Lost race' } } })
+    await resolveNow()
+    await wait(5100)
+    expect(screen.getByText('Lost race').closest('.toast').dataset.kind).toBe('error')
+  })
+
+  test('logging out inside the window cancels it', async () => {
+    api.logout.mockResolvedValue({})
+    await resolveNow()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Log out' })) })
+    await wait(10_000)
+    expect(api.updateStatus).not.toHaveBeenCalled()
+  })
+})
+
+// ---- UX step 4: phone push view ----
+
+test('with an incident open there is a "Back to incidents" button that clears the selection', async () => {
+  window.history.replaceState(null, '', '/?incident=abc')
+  await open('sre')
+  expect(document.querySelector('.split').dataset.selected).toBe('true')
+  await userEvent.click(screen.getByRole('button', { name: 'Back to incidents' }))
+  expect(screen.getByTestId('detail').textContent).toBe('null')
+  expect(window.location.search).toBe('')
+  expect(document.querySelector('.split').dataset.selected).toBe('false')
+  expect(screen.queryByRole('button', { name: 'Back to incidents' })).toBeNull()
+})
+
+test('Back returns focus to the row that was open', async () => {
+  window.history.replaceState(null, '', '/?incident=p2-1')
+  api.fetchWorkItems.mockResolvedValue({ items: [p2()], next_cursor: null })
+  await open('sre')
+  const row = await screen.findByRole('button', { name: /CACHE_P2/ })
+  await userEvent.click(screen.getByRole('button', { name: 'Back to incidents' }))
+  expect(document.activeElement).toBe(row)
+})
+
+// ---- UX step 5: Inject is a dev tool ----
+
+test('Inject lives under Dev tools, and the main group is Incidents, Analytics, Account', async () => {
+  await open('sre')
+  const dev = screen.getByRole('group', { name: 'Dev tools' })
+  expect(within(dev).getByRole('button', { name: 'Inject' })).toBeTruthy()
+  const main = [...document.querySelectorAll('.nav-items button')].map(b => b.textContent)
+  expect(main).toEqual(['Incidents', 'Analytics', 'Account'])
+})
+
+test('a viewer has no Dev tools group', async () => {
+  await open('viewer')
+  expect(screen.queryByRole('group', { name: 'Dev tools' })).toBeNull()
+})
+
+test('Inject still opens from the Dev tools group', async () => {
+  await open('sre')
+  await userEvent.click(screen.getByRole('button', { name: 'Inject' }))
+  expect(screen.getByRole('button', { name: 'Inject' }).getAttribute('aria-current')).toBe('page')
+  expect(screen.getByRole('heading', { name: 'Signal injector' })).toBeTruthy()
+})
+
+describe('second critique: App', () => {
+  test('the list filters survive a tab switch', async () => {
+    await open('sre')
+    await userEvent.click(screen.getByRole('button', { name: 'Closed' }))
+    expect(screen.getByRole('button', { name: 'Closed' }).getAttribute('aria-pressed')).toBe('true')
+    await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Incidents' }))
+    expect(screen.getByRole('button', { name: 'Closed' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('false')
+  })
+
+  test('the tab title names the open incident, and keeps the unseen-P0 count in front', async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await waitFor(() => expect(document.title).toBe('COMP_abc · Nullify'))
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    emit(created())
+    await waitFor(() => expect(document.title).toBe('(1) COMP_abc · Nullify'))
+  })
+
+  test('the title goes back to the app name on another tab', async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await waitFor(() => expect(document.title).toBe('COMP_abc · Nullify'))
+    await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+    expect(document.title).toBe('Nullify')
+  })
+
+  test.each([['Analytics', 'Analytics'], ['Account', 'Account'], ['Inject', 'Signal injector']])('the %s page has a level-1 title', async (tab, title) => {
+    await open('sre')
+    await userEvent.click(screen.getByRole('button', { name: tab }))
+    expect(await screen.findByRole('heading', { level: 1, name: title })).toBeTruthy()
+  })
+})
+
+describe('third critique: palette actions', () => {
+  const openPalette = async () => {
+    await userEvent.keyboard('{Control>}k{/Control}')
+    return screen.findByRole('dialog', { name: 'Command palette' })
+  }
+  const choose = (name) => userEvent.click(screen.getByRole('option', { name }))
+  const atIncident = async (status = 'OPEN') => {
+    mockDetail.status = status
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await waitFor(() => expect(screen.getByTestId('detail').textContent).toBe('abc'))
+    await openPalette()
+  }
+
+  test('Start investigating calls updateStatus and toasts that it was assigned to you', async () => {
+    api.updateStatus.mockResolvedValue({ id: 'abc', status: 'INVESTIGATING', assignee_id: 'u1' })
+    await atIncident('OPEN')
+    await choose('Start investigating COMP_abc')
+    expect(api.updateStatus).toHaveBeenCalledWith('abc', 'INVESTIGATING')
+    expect(await screen.findByText('Investigating · assigned to you')).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+  })
+
+  test('Start investigating on an incident that stays unowned gets the plain toast, and a failure toasts the error', async () => {
+    api.updateStatus.mockResolvedValueOnce({ id: 'abc', status: 'INVESTIGATING', assignee_id: null })
+    await atIncident('OPEN')
+    await choose('Start investigating COMP_abc')
+    expect(await screen.findByText('Moved to INVESTIGATING')).toBeTruthy()
+  })
+
+  test('a failed Start investigating shows an error toast', async () => {
+    api.updateStatus.mockRejectedValue({ response: { status: 409, data: { detail: 'Lost race' } } })
+    await atIncident('OPEN')
+    await choose('Start investigating COMP_abc')
+    expect((await screen.findByText('Lost race')).closest('.toast').dataset.kind).toBe('error')
+  })
+
+  test('Assign to me assigns the signed-in user and toasts', async () => {
+    api.assignWorkItem.mockResolvedValue({ id: 'abc', assignee_id: 'u1', assignee_username: 'me' })
+    await atIncident('INVESTIGATING')
+    await choose('Assign COMP_abc to me')
+    expect(api.assignWorkItem).toHaveBeenCalledWith('abc', 'u1')
+    expect(await screen.findByText('Assigned to you')).toBeTruthy()
+  })
+
+  test('Mark resolved goes through the 5 second undo, and nothing is sent yet', async () => {
+    await atIncident('INVESTIGATING')
+    await choose('Mark resolved COMP_abc')
+    expect(screen.getByText('Resolving COMP_abc in 5 s')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeTruthy()
+    expect(api.updateStatus).not.toHaveBeenCalled()
+  })
+
+  test('Copy link writes the incident URL and toasts', async () => {
+    const writeText = vi.fn().mockResolvedValue()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    await atIncident('CLOSED')
+    await choose('Copy link to COMP_abc')
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/?incident=abc`)
+    expect(await screen.findByText('Link copied')).toBeTruthy()
+  })
+
+  test('no incident actions on another tab, even with an incident in the URL', async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await waitFor(() => expect(screen.getByTestId('detail').textContent).toBe('abc'))
+    await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+    await openPalette()
+    expect(screen.queryByRole('group', { name: 'This incident' })).toBeNull()
+  })
+
+  describe('Open next critical', () => {
+    // sla_deadline decides the order: the most overdue P0 comes first, so the list reads a, b, c
+    const crit = (id, hoursLate) => p0({ id, component: `P0_${id}`, sla_deadline: new Date(Date.now() - hoursLate * 3_600_000).toISOString() })
+    const current = () => new URLSearchParams(window.location.search).get('incident')
+
+    test('goes down the critical incidents in list order and wraps to the first after the last', async () => {
+      api.fetchWorkItems.mockResolvedValue({ items: [crit('c', 1), crit('a', 3), crit('b', 2)], next_cursor: null })
+      await open('sre')
+      await waitFor(() => expect(current()).toBe('a'))  // auto-select still opens the top one
+      for (const expected of ['b', 'c', 'a']) {
+        await openPalette()
+        await choose('Open next critical')
+        await waitFor(() => expect(current()).toBe(expected))
+      }
+    })
+
+    test('is hidden when there is no other critical incident', async () => {
+      api.fetchWorkItems.mockResolvedValue({ items: [crit('a', 1), p2()], next_cursor: null })
+      await open('sre')
+      await waitFor(() => expect(current()).toBe('a'))
+      await openPalette()
+      expect(screen.queryByRole('option', { name: 'Open next critical' })).toBeNull()
+    })
+
+    test('from a non-critical incident it opens the first critical one', async () => {
+      window.history.replaceState(null, '', '/?incident=p2-1')
+      api.fetchWorkItems.mockResolvedValue({ items: [crit('a', 3), crit('b', 2), p2()], next_cursor: null })
+      await open('sre')
+      await screen.findByRole('button', { name: /P0_a/ })
+      await openPalette()
+      await choose('Open next critical')
+      await waitFor(() => expect(current()).toBe('a'))
+    })
+  })
+})
+
+describe('fourth critique: live feed status', () => {
+  const stripState = () => within(document.querySelector('.health-bar')).getByRole('status')
+  const report = (status) => act(() => useWebSocket.mock.calls.at(-1)[2](status))
+
+  test('the strip says CONNECTING before the socket has authenticated, then LIVE after auth_ok', async () => {
+    await open('sre')
+    expect(stripState().textContent).toBe('CONNECTING…')
+    report('live')
+    expect(stripState().textContent).toBe('LIVE')
+  })
+
+  test('a dropped socket reads RECONNECTING until it is live again', async () => {
+    await open('sre')
+    report('live')
+    report('reconnecting')
+    expect(stripState().textContent).toBe('RECONNECTING · events may be missed')
+    report('live')
+    expect(stripState().textContent).toBe('LIVE')
+  })
+})
+
+describe('fourth critique: Analytics tiles navigate', () => {
+  const openAnalytics = async (open_by_priority) => {
+    api.fetchSLA.mockResolvedValue({ total: 9, breached: 1, breach_rate_pct: 11, open_by_priority })
+    await open('sre')
+    await userEvent.click(screen.getByRole('button', { name: 'Closed' }))  // the list is somewhere else than the tile will send us
+    await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+  }
+
+  test('"Show N open incidents" lands on Incidents with ACTIVE pressed and no priority', async () => {
+    await openAnalytics({ P0: 2, P1: 1, P2: 0, P3: 0 })
+    await userEvent.click(await screen.findByRole('button', { name: 'Show 3 open incidents' }))
+    expect(screen.getByRole('button', { name: 'Incidents' }).getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('combobox', { name: 'Priority' }).value).toBe('')
+  })
+
+  test('"Show N open P0 incidents" lands on ACTIVE with the P0 priority', async () => {
+    await openAnalytics({ P0: 2, P1: 1, P2: 0, P3: 0 })
+    await userEvent.click(await screen.findByRole('button', { name: 'Show 2 open P0 incidents' }))
+    expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('combobox', { name: 'Priority' }).value).toBe('P0')
+  })
+
+  test('leftover search and Assigned to me do not hide what the tile counted', async () => {
+    api.fetchSLA.mockResolvedValue({ total: 9, breached: 1, breach_rate_pct: 11, open_by_priority: { P0: 1, P1: 0, P2: 0, P3: 0 } })
+    await open('sre')
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search components' }), 'zzz')
+    await userEvent.click(screen.getByRole('button', { name: 'Assigned to me' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Show 1 open incident' }))
+    expect(screen.getByRole('searchbox', { name: 'Search components' }).value).toBe('')
+    expect(screen.getByRole('button', { name: 'Assigned to me' }).getAttribute('aria-pressed')).toBe('false')
+  })
 })

@@ -16,24 +16,45 @@ import { useToast } from './context/toast';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useCoalesced } from './hooks/useCoalesced';
 import { useUrlParam } from './hooks/useUrlParam';
+import { usePendingAction } from './hooks/usePendingAction';
+import { updateStatus, assignWorkItem, errorMessage } from './api/client';
+import { startedMessage, copyIncidentLink } from './format';
 import { Icon } from './components/Icon';
 import { useSplitWidth } from './hooks/useSplitWidth';
 import { getThemePref, setThemePref, nextTheme } from './theme';
+import { DEFAULT_VIEW } from './sort';
 
 const TAB_ICON = { incidents: 'alert-triangle', analytics: 'bar-chart', inject: 'zap', account: 'user', users: 'users' };
 const THEME_ICON = { system: 'monitor', light: 'sun', dark: 'moon' };
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const RESOLVE_UNDO_MS = 5000;
+const PHONE_BELOW = 900;  // same breakpoint as the CSS: under it the list and the detail take turns
+
+function NavItem({ tab, activeTab, onOpen }) {
+  return (
+    <button type="button" className="nav-item" aria-current={activeTab === tab ? 'page' : undefined} onClick={() => onOpen(tab)}>
+      <Icon name={TAB_ICON[tab]} />
+      <span className="nav-label">{cap(tab)}</span>
+    </button>
+  );
+}
 
 function Dashboard() {
   const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState('incidents');
   // The open incident lives in the URL (?incident=<id>), so reload, Back and a pasted link all work.
   const [selectedId, setSelectedId] = useUrlParam('incident');
+  const [openInfo, setOpenInfo] = useState(null);  // { id, component, status, assignee_id } of the incident the detail pane loaded
+  const [criticalIds, setCriticalIds] = useState([]);  // the list's active P0s, in the order its rows show them
+  // The list's filters and sort live here: the list unmounts on a tab switch and must come back as it was left.
+  const [view, setView] = useState(DEFAULT_VIEW);
   const toast = useToast();
   const [unseenP0, setUnseenP0] = useState(0);
+  const [unopenedP0, setUnopenedP0] = useState([]);  // new P0s nobody has opened yet this page session, oldest first
   const baseTitle = useRef(document.title);
   const [refreshTick, setRefreshTick] = useState(0);
   const [liveEvents, setLiveEvents] = useState([]);
+  const [feed, setFeed] = useState('connecting');  // the WebSocket's state, shown in the status strip
   const [theme, setTheme] = useState(getThemePref);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const split = useSplitWidth();
@@ -41,12 +62,80 @@ function Dashboard() {
   // A burst of WebSocket events becomes one refetch per second instead of one per event.
   const refreshOnEvent = useCoalesced(refresh, 1000);
 
-  const select = useCallback((id) => { setSelectedId(id); setActiveTab('incidents'); }, [setSelectedId]);
+  // The Analytics tiles count a view of the list; open it exactly as counted (no leftover search or Assigned to me).
+  const goToIncidents = (viewPatch) => {
+    setView(v => ({ ...v, priority: '', mine: false, search: '', ...viewPatch }));
+    setActiveTab('incidents');
+  };
+
+  const select = useCallback((id, opts) => {
+    setSelectedId(id, opts);
+    setActiveTab('incidents');
+    setUnopenedP0(ids => ids.includes(id) ? ids.filter(x => x !== id) : ids);
+  }, [setSelectedId]);
+
+  // Open the most urgent incident once per page load, unless the URL already names one. On a phone the list
+  // stays up instead (opening an incident there would hide the list). Replace, so Back is not trapped on "nothing selected".
+  const autoSelected = useRef(false);
+  const onListLoaded = useCallback((ids) => {
+    setCriticalIds(ids);
+    if (autoSelected.current) return;
+    autoSelected.current = true;
+    if (!selectedId && ids.length && window.innerWidth >= PHONE_BELOW) select(ids[0], { replace: true });
+  }, [selectedId, select]);
+
+  // Back to the list (phone view): the row that was open gets the focus again once it is visible.
+  const backTo = useRef(null);
+  const goBack = () => { backTo.current = selectedId; select(null); };
+  useEffect(() => {
+    if (selectedId != null || !backTo.current) return;
+    document.querySelector(`[data-incident-id="${backTo.current}"]`)?.focus();
+    backTo.current = null;
+  }, [selectedId]);
+
+  // Resolve waits 5 s so it can be undone. It lives here, not in the detail pane, so it survives switching incidents.
+  const resolver = usePendingAction(RESOLVE_UNDO_MS);
+  const resolve = ({ id, component }) => {
+    toast(`Resolving ${component} in 5 s`, { ttl: RESOLVE_UNDO_MS, action: { label: 'Undo', onClick: () => resolver.cancel(id) } });
+    resolver.start(id, async () => {
+      try {
+        await updateStatus(id, 'RESOLVED');
+        toast('Moved to RESOLVED');
+      } catch (e) {
+        toast(errorMessage(e, 'Action failed'), { kind: 'error' });
+      }
+      refresh();
+    });
+  };
+
+  // Palette actions on the open incident. Each ends in a refresh so the list and the pane show the new state.
+  const startInvestigating = async (incident) => {
+    try {
+      const updated = await updateStatus(incident.id, 'INVESTIGATING');
+      toast(startedMessage(incident, updated, user.id));
+    } catch (e) {
+      toast(errorMessage(e, 'Action failed'), { kind: 'error' });
+    }
+    refresh();
+  };
+  const assignMe = async (incident) => {
+    try {
+      await assignWorkItem(incident.id, user.id);
+      toast('Assigned to you');
+    } catch (e) {
+      toast(errorMessage(e, 'Action failed'), { kind: 'error' });
+    }
+    refresh();
+  };
+  // The next critical incident after the open one, wrapping at the end (the first when the open one is not critical).
+  const nextCriticalId = criticalIds.length ? criticalIds[(criticalIds.indexOf(selectedId) + 1) % criticalIds.length] : null;
+  const onPaletteIncident = activeTab === 'incidents' && selectedId != null && openInfo?.id === selectedId ? openInfo : null;
 
   // A new P0 gets a toast, plus a title badge and a desktop notification while the tab is in the background.
   const alertP0 = (msg) => {
     const text = `New P0: ${msg.component}`;
     toast(text, { kind: 'alert', action: { label: 'Open', onClick: () => select(msg.id) } });
+    setUnopenedP0(ids => ids.includes(msg.id) ? ids : [...ids, msg.id]);
     if (!document.hidden) return;
     setUnseenP0(n => n + 1);
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -57,11 +146,14 @@ function Dashboard() {
     }
   };
 
+  // "(2) RDBMS_PRIMARY · Nullify": the unseen-P0 count first, then the open incident while the Incidents tab shows it.
+  const openName = activeTab === 'incidents' && selectedId != null && openInfo?.id === selectedId ? openInfo.component : null;
   useEffect(() => {
     const base = baseTitle.current;
-    document.title = unseenP0 ? `(${unseenP0}) ${base}` : base;
+    const name = openName ? `${openName} · ${base}` : base;
+    document.title = unseenP0 ? `(${unseenP0}) ${name}` : name;
     return () => { document.title = base; };
-  }, [unseenP0]);
+  }, [unseenP0, openName]);
   useEffect(() => {
     const onVisible = () => { if (!document.hidden) setUnseenP0(0); };
     document.addEventListener('visibilitychange', onVisible);
@@ -79,18 +171,19 @@ function Dashboard() {
       msg.event === 'work_item_assigned' ? 'assignment changed' :
       msg.event === 'work_item_created'  ? `new ${msg.priority} ${msg.component}` : msg.event;
     setLiveEvents(ev => [label, ...ev].slice(0, 5));
-  });
+  }, refresh, setFeed);  // events are lost while the socket is down, so refetch once it is back
 
   // Ctrl/Cmd+K toggles the command palette from anywhere.
   useEffect(() => {
     const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o); }
+      if ((e.metaKey || e.ctrlKey) && e.key?.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o); }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
   const tabs = tabsFor(user);
+  const devTools = tabs.includes('inject');  // SRE and admin only, kept apart from the pages people work in
 
   const chooseTheme = (pref) => { setThemePref(pref); setTheme(pref); };
   const cycleTheme = () => chooseTheme(nextTheme(theme));
@@ -104,16 +197,16 @@ function Dashboard() {
         </div>
 
         <div className="nav-items">
-          {tabs.map(tab => (
-            <button type="button" key={tab} className="nav-item" aria-current={activeTab === tab ? 'page' : undefined}
-              onClick={() => setActiveTab(tab)}>
-              <Icon name={TAB_ICON[tab]} />
-              <span className="nav-label">{cap(tab)}</span>
-            </button>
-          ))}
+          {tabs.filter(tab => tab !== 'inject').map(tab => <NavItem key={tab} tab={tab} activeTab={activeTab} onOpen={setActiveTab} />)}
         </div>
 
         <div className="sidebar-foot">
+          {devTools && (
+            <div className="nav-group" role="group" aria-labelledby="dev-tools-label">
+              <span className="micro nav-group-label" id="dev-tools-label">Dev tools</span>
+              <NavItem tab="inject" activeTab={activeTab} onOpen={setActiveTab} />
+            </div>
+          )}
           <button type="button" className="nav-item" aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}>
             <Icon name="search" />
             <span className="nav-label">Search</span>
@@ -135,16 +228,20 @@ function Dashboard() {
       </nav>
 
       {paletteOpen && (
-        <CommandPalette onClose={() => setPaletteOpen(false)} onGo={setActiveTab} onTheme={chooseTheme} onSelectIncident={select} />
+        <CommandPalette onClose={() => setPaletteOpen(false)} onGo={setActiveTab} onTheme={chooseTheme} onSelectIncident={select}
+          activeTab={activeTab} theme={theme} incident={onPaletteIncident}
+          onStartInvestigating={startInvestigating} onAssignMe={assignMe} onResolve={resolve} onCopyLink={({ id }) => copyIncidentLink(id, toast)}
+          onNextCritical={nextCriticalId && nextCriticalId !== selectedId ? () => select(nextCriticalId) : undefined} />
       )}
 
       <div className="content">
-        <HealthBar liveEvents={liveEvents} />
+        <HealthBar feed={feed} liveEvents={liveEvents} newP0={unopenedP0.length} onOpenNewP0={() => select(unopenedP0[0])} />
 
         <main className="main">
           {activeTab === 'incidents' && (
-            <div className="split" style={{ '--list-w': `${split.width}px` }}>
-              <IncidentList onSelect={select} selectedId={selectedId} refreshTick={refreshTick} />
+            <div className="split" data-selected={selectedId != null} style={{ '--list-w': `${split.width}px` }}>
+              <IncidentList view={view} setView={setView} onSelect={select} selectedId={selectedId}
+                selectedInfo={openInfo} refreshTick={refreshTick} onLoaded={onListLoaded} />
               {/* A focusable separator is a widget in ARIA (window splitter); the lint rules only know the static kind. */}
               {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
               <div role="separator" className="split-handle" tabIndex={0} aria-orientation="vertical" aria-label="Resize incident list"
@@ -152,8 +249,14 @@ function Dashboard() {
                 onKeyDown={split.onKeyDown} onPointerDown={split.onPointerDown} onPointerMove={split.onPointerMove}
                 onPointerUp={split.onPointerUp} onPointerCancel={split.onPointerUp} onDoubleClick={split.onDoubleClick} />
               <div className="pane">
+                {selectedId != null && (
+                  <button type="button" className="btn-link back-btn" onClick={goBack}>
+                    <Icon name="chevron-left" size={14} />Back to incidents
+                  </button>
+                )}
                 <ErrorBoundary resetKey={selectedId}>
-                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} />
+                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} onOpened={setOpenInfo}
+                    onResolve={resolve} resolving={!!resolver.pending[selectedId]} />
                 </ErrorBoundary>
               </div>
             </div>
@@ -161,7 +264,7 @@ function Dashboard() {
           {activeTab === 'analytics' && (
             <div className="pane pane-row">
               <ErrorBoundary>
-                <AnalyticsPanel />
+                <AnalyticsPanel refreshTick={refreshTick} onShowIncidents={goToIncidents} />
               </ErrorBoundary>
             </div>
           )}

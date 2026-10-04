@@ -14,6 +14,6 @@ export class ErrorBoundary extends Component {
 
   render() {
     if (!this.state.failed) return this.props.children;
-    return <ErrorNote>Something went wrong showing this panel. Pick another item or reload the page.</ErrorNote>;
+    return <ErrorNote>Something went wrong showing this panel. Reload the page to try again.</ErrorNote>;
   }
 }

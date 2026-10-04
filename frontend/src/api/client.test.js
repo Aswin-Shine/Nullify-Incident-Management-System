@@ -56,7 +56,37 @@ test('errorMessage turns string, array and missing details into one string', asy
   const { client } = await load()
   expect(client.errorMessage({ response: { data: { detail: 'Lost race' } } })).toBe('Lost race')
   expect(client.errorMessage({ response: { data: { detail: [{ msg: 'a' }, { msg: 'b' }] } } })).toBe('a; b')
-  expect(client.errorMessage(new Error('Network Error'), 'Failed')).toBe('Failed')
+  expect(client.errorMessage(new Error('plain bug'), 'Failed')).toBe('Failed')
+})
+
+const axiosErr = (response) => Object.assign(new Error('x'), { isAxiosError: true, response })
+const res = (status, data = {}, headers = {}) => ({ status, data, headers })
+
+test('errorMessage says what happened: no response, 403, 5xx, and the generic 500 body', async () => {
+  const { client } = await load()
+  expect(client.errorMessage(axiosErr(undefined), 'Failed')).toBe("Can't reach the server. Check your connection and try again.")
+  expect(client.errorMessage(axiosErr(res(403)), 'Failed')).toBe("You don't have permission to do that.")
+  const server = 'The server hit an error. Try again; if it keeps failing, check the backend logs.'
+  expect(client.errorMessage(axiosErr(res(500, { detail: 'Internal Server Error' })), 'Failed')).toBe(server)
+  expect(client.errorMessage(axiosErr(res(500, '<html>oops</html>')), 'Failed')).toBe(server)
+  expect(client.errorMessage(axiosErr(res(500, { detail: 'Database is locked' })), 'Failed')).toBe('Database is locked')
+  expect(client.errorMessage(axiosErr(res(403, { detail: 'Admins only' })), 'Failed')).toBe('Admins only')
+  expect(client.errorMessage(axiosErr(res(404)), 'Incident not found')).toBe('Incident not found')
+  expect(client.errorMessage(axiosErr(res(409)), 'Failed')).toBe('Failed')
+})
+
+test('errorMessage on 429 reads Retry-After, and falls back to "in a moment"', async () => {
+  const { client } = await load()
+  expect(client.errorMessage(axiosErr(res(429, { detail: 'Rate limit exceeded' }, { 'retry-after': '30' })))).toBe('Too many requests. Try again in 30 seconds.')
+  expect(client.errorMessage(axiosErr(res(429, {}, { 'retry-after': '1' })))).toBe('Too many requests. Try again in 1 second.')
+  expect(client.errorMessage(axiosErr(res(429)))).toBe('Too many requests. Try again in a moment.')
+  expect(client.errorMessage(axiosErr(res(429, {}, { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' })))).toBe('Too many requests. Try again in a moment.')
+})
+
+test('errorMessage keeps the 422 list as one line and an empty list as the fallback', async () => {
+  const { client } = await load()
+  expect(client.errorMessage(axiosErr(res(422, { detail: [{ msg: 'a' }, { msg: 'b' }] })))).toBe('a; b')
+  expect(client.errorMessage(axiosErr(res(422, { detail: [] })), 'Failed')).toBe('Failed')
 })
 
 test('changePassword stores the returned access token for the next request', async () => {
@@ -92,4 +122,33 @@ test('fetchTimeseries asks for the last 60 minutes', async () => {
   client.api.defaults.adapter = async (config) => { params = config.params; return { data: [], status: 200, statusText: '', headers: {}, config } }
   await client.fetchTimeseries()
   expect(params).toEqual({ limit: 60 })
+})
+
+test('fetchRCA gives null for a 404 and rethrows anything else (F-38)', async () => {
+  const { client } = await load()
+  const failWith = (status) => {
+    client.api.defaults.adapter = async (config) => { throw Object.assign(new Error(String(status)), { config, response: { status } }) }
+  }
+  failWith(404)
+  expect(await client.fetchRCA('wi-1')).toBeNull()
+  failWith(500)
+  await expect(client.fetchRCA('wi-1')).rejects.toBeTruthy()
+})
+
+test('errorMessage drops the pydantic "Value error, " prefix from each 422 message', async () => {
+  const { client } = await load()
+  expect(client.errorMessage(axiosErr(res(422, { detail: [{ msg: 'Value error, Comment must be at most 4000 characters' }] })))).toBe('Comment must be at most 4000 characters')
+  expect(client.errorMessage(axiosErr(res(422, { detail: [{ msg: 'Value error, a' }, { msg: 'Field required' }] })))).toBe('a; Field required')
+})
+
+test.each([502, 503, 504])('errorMessage reads a %i gateway error as the API being unreachable', async (status) => {
+  const { client } = await load()
+  expect(client.errorMessage(axiosErr(res(status, '<html>gateway</html>')), 'Failed')).toBe('The API is unreachable right now. Try again in a moment.')
+})
+
+test('errorMessage keeps the server-error text for 500 and other 5xx', async () => {
+  const { client } = await load()
+  const server = 'The server hit an error. Try again; if it keeps failing, check the backend logs.'
+  expect(client.errorMessage(axiosErr(res(500)), 'Failed')).toBe(server)
+  expect(client.errorMessage(axiosErr(res(501)), 'Failed')).toBe(server)
 })

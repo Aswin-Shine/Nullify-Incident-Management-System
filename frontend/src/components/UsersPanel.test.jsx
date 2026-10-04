@@ -84,3 +84,27 @@ test('Reset password opens an inline field and calls updateUser with the passwor
   await userEvent.click(within(bob).getByRole('button', { name: 'Save' }))
   expect(api.updateUser).toHaveBeenCalledWith('u2', { password: 'reset-by-the-admin-1' })
 })
+
+test('the create form constrains its inputs and explains the rules', async () => {
+  await renderAs('admin', <UsersPanel />)
+  const username = await screen.findByLabelText('Username')
+  expect(username.required).toBe(true)
+  expect(username.minLength).toBe(3)
+  expect(username.maxLength).toBe(64)
+  expect(username.pattern).toBe('[A-Za-z0-9_.\\-]{3,64}')
+  expect(username.getAttribute('aria-describedby')).toBeTruthy()
+  expect(document.getElementById(username.getAttribute('aria-describedby')).textContent).toBe('3-64 letters, digits, dot, dash or underscore')
+  const password = screen.getByLabelText('Password')
+  expect(password.required).toBe(true)
+  expect(password.minLength).toBe(12)
+  expect(password.maxLength).toBe(128)
+  expect(document.getElementById(password.getAttribute('aria-describedby')).textContent).toBe('At least 12 characters')
+  expect(screen.getByLabelText('Email').required).toBe(true)
+})
+
+test('the reset password input requires 12 characters', async () => {
+  await renderAs('admin', <UsersPanel />)
+  const bob = await row('bob')
+  await userEvent.click(within(bob).getByRole('button', { name: 'Reset password' }))
+  expect(within(bob).getByLabelText('New password for bob').minLength).toBe(12)
+})

@@ -15,7 +15,7 @@ function ResetPassword({ username, onSave }) {
   return (
     <span className="reset-row">
       <input name="reset_password" type="password" autoComplete="new-password" aria-label={`New password for ${username}`}
-        value={pw} onChange={e => setPw(e.target.value)} />
+        minLength={12} value={pw} onChange={e => setPw(e.target.value)} />
       <button type="button" className="btn-link" disabled={pw.length < 12}
         onClick={async () => { if (await onSave(pw)) { setPw(''); setOpen(false); } }}>Save</button>
       <button type="button" className="btn-link" onClick={() => { setPw(''); setOpen(false); }}>Cancel</button>
@@ -86,9 +86,15 @@ export function UsersPanel() {
       <form className="panel card panel-card" onSubmit={create}>
         <h2 className="card-title">Create user</h2>
         <div className="injector-pair">
-          <Field label="Username">{id => <input id={id} name="username" autoComplete="off" value={form.username} onChange={set('username')} />}</Field>
-          <Field label="Email">{id => <input id={id} name="email" type="email" autoComplete="off" value={form.email} onChange={set('email')} />}</Field>
-          <Field label="Password">{id => <input id={id} name="password" type="password" autoComplete="new-password" value={form.password} onChange={set('password')} />}</Field>
+          <Field label="Username" hint="3-64 letters, digits, dot, dash or underscore">
+            {(id, hint) => <input id={id} name="username" autoComplete="off" required minLength={3} maxLength={64} pattern="[A-Za-z0-9_.\-]{3,64}"
+              aria-describedby={hint} value={form.username} onChange={set('username')} />}
+          </Field>
+          <Field label="Email">{id => <input id={id} name="email" type="email" autoComplete="off" required value={form.email} onChange={set('email')} />}</Field>
+          <Field label="Password" hint="At least 12 characters">
+            {(id, hint) => <input id={id} name="password" type="password" autoComplete="new-password" required minLength={12} maxLength={128}
+              aria-describedby={hint} value={form.password} onChange={set('password')} />}
+          </Field>
           <Field label="Role">
             {id => (
               <select id={id} name="role" value={form.role} onChange={set('role')}>

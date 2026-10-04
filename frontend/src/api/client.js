@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { plural } from '../format';
 
 // Same-origin by default: nginx (Docker) or the Vite dev proxy forwards /api, /ws and /health.
 const BASE = import.meta.env.VITE_API_URL ?? '';
@@ -45,11 +46,23 @@ api.interceptors.response.use(undefined, async (error) => {
   return api(config);
 });
 
-// One readable string from a FastAPI error: a string detail, a 422 list of {msg}, or no response at all.
+// One readable string from a failed request. The server's detail wins (a string, or a 422 list of {msg}), except the
+// generic 500 body, and a 429 that says when to retry (the server's own text does not). With no detail it says what
+// kind of failure it was; a 404 and anything unmapped use the caller's `fallback`.
 export function errorMessage(e, fallback = 'Request failed') {
-  const detail = e?.response?.data?.detail;
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail)) return detail.map(d => d.msg ?? String(d)).join('; ') || fallback;
+  const res = e?.response;
+  const status = res?.status;
+  const detail = res?.data?.detail;
+  const secs = status === 429 ? Number.parseInt(res.headers?.['retry-after'], 10) : NaN;
+  if (secs > 0) return `Too many requests. Try again in ${secs} ${plural(secs, 'second')}.`;
+  if (typeof detail === 'string' && !(status >= 500 && detail === 'Internal Server Error')) return detail;
+  // pydantic prefixes a validator's own message with "Value error, "
+  if (Array.isArray(detail)) return detail.map(d => (d.msg ?? String(d)).replace(/^Value error, /, '')).join('; ') || fallback;
+  if (!res) return axios.isAxiosError(e) ? "Can't reach the server. Check your connection and try again." : fallback;
+  if (status === 429) return 'Too many requests. Try again in a moment.';
+  if (status === 403) return "You don't have permission to do that.";
+  if (status === 502 || status === 503 || status === 504) return 'The API is unreachable right now. Try again in a moment.';  // the proxy answered, the backend did not
+  if (status >= 500) return 'The server hit an error. Try again; if it keeps failing, check the backend logs.';
   return fallback;
 }
 
@@ -69,7 +82,11 @@ export const fetchWorkItems = ({ status, limit, q, priority, assignee } = {}) =>
 export const fetchWorkItem = (id) => api.get(`/api/work-items/${id}`).then(r => r.data);
 export const fetchHistory = (id) => api.get(`/api/work-items/${id}/history`).then(r => r.data);
 export const fetchSignals = (id) => api.get(`/api/work-items/${id}/signals`).then(r => r.data);
-export const fetchRCA = (id) => api.get(`/api/work-items/${id}/rca`).then(r => r.data).catch(() => null);
+// A missing RCA is a 404 and means "none yet"; any other failure must surface, not look like an empty form.
+export const fetchRCA = (id) => api.get(`/api/work-items/${id}/rca`).then(r => r.data).catch(e => {
+  if (e.response?.status === 404) return null;
+  throw e;
+});
 export const updateStatus = (id, new_status) =>
   api.patch(`/api/work-items/${id}/status`, { new_status }).then(r => r.data);
 export const assignWorkItem = (id, assignee_id) =>

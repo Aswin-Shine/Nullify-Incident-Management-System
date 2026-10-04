@@ -51,3 +51,52 @@ test('a 1008 close refreshes the session and then reconnects', async () => {
   await vi.advanceTimersByTimeAsync(3000)
   expect(sockets).toHaveLength(2)
 })
+
+test('auth_ok after a reconnect calls onReconnect, the first one does not (F-35)', async () => {
+  const onReconnect = vi.fn()
+  renderHook(() => useWebSocket(() => {}, onReconnect))
+  sockets[0].onmessage({ data: JSON.stringify({ event: 'auth_ok' }) })
+  expect(onReconnect).not.toHaveBeenCalled()
+  act(() => sockets[0].onclose({ code: 1006 }))
+  await vi.advanceTimersByTimeAsync(3000)
+  sockets[1].onmessage({ data: JSON.stringify({ event: 'auth_ok' }) })
+  expect(onReconnect).toHaveBeenCalledTimes(1)
+})
+
+const authOk = (ws) => ws.onmessage({ data: JSON.stringify({ event: 'auth_ok' }) })
+
+test('onStatus goes connecting, live on auth_ok, reconnecting on close, live on the next auth_ok', async () => {
+  const onStatus = vi.fn()
+  renderHook(() => useWebSocket(() => {}, undefined, onStatus))
+  expect(onStatus.mock.calls.map(c => c[0])).toEqual(['connecting'])
+  sockets[0].onopen()
+  expect(onStatus).toHaveBeenCalledTimes(1)  // an open socket is not live until the server accepts our token
+  authOk(sockets[0])
+  expect(onStatus).toHaveBeenLastCalledWith('live')
+  act(() => sockets[0].onclose({ code: 1006 }))
+  expect(onStatus).toHaveBeenLastCalledWith('reconnecting')
+  await vi.advanceTimersByTimeAsync(3000)
+  expect(onStatus).toHaveBeenLastCalledWith('reconnecting')  // the retry itself is still not live
+  authOk(sockets[1])
+  expect(onStatus.mock.calls.map(c => c[0])).toEqual(['connecting', 'live', 'reconnecting', 'live'])
+})
+
+test('a rejected token (1008) also reads as reconnecting', () => {
+  const onStatus = vi.fn()
+  renderHook(() => useWebSocket(() => {}, undefined, onStatus))
+  act(() => sockets[0].onclose({ code: 1008 }))
+  expect(onStatus).toHaveBeenLastCalledWith('reconnecting')
+})
+
+test('unmounting does not report a status', () => {
+  const onStatus = vi.fn()
+  const { unmount } = renderHook(() => useWebSocket(() => {}, undefined, onStatus))
+  onStatus.mockClear()
+  unmount()
+  expect(onStatus).not.toHaveBeenCalled()
+})
+
+test('onStatus is optional', () => {
+  renderHook(() => useWebSocket(() => {}))
+  expect(() => authOk(sockets[0])).not.toThrow()
+})

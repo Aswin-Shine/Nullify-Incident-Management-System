@@ -38,21 +38,30 @@ test('shows at most 3 toasts, dropping the oldest', () => {
   for (const m of ['two', 'three', 'four']) expect(screen.getByText(m)).toBeTruthy()
 })
 
-test('an alert toast uses role=alert, stays 10 seconds, and its action runs and dismisses it', () => {
+test('an alert toast uses role=alert, stays until dismissed, and its action runs and dismisses it', () => {
   const onClick = vi.fn()
   mount(<Fire message="New P0: DB" options={{ kind: 'alert', action: { label: 'Open', onClick } }} />)
   fire('New P0: DB')
   expect(screen.getByRole('alert').textContent).toContain('New P0: DB')
-  act(() => { vi.advanceTimersByTime(9000) })
+  act(() => { vi.advanceTimersByTime(60_000) })
   expect(screen.queryByText('New P0: DB')).not.toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Open' }))
   expect(onClick).toHaveBeenCalledTimes(1)
   expect(screen.queryByText('New P0: DB')).toBeNull()
 })
 
-test('an alert toast disappears after 10 seconds on its own', () => {
+test('an alert toast never dismisses itself, so a new P0 cannot be missed', () => {
   mount(<Fire message="Boom" options={{ kind: 'alert' }} />)
   fire('Boom')
-  act(() => { vi.advanceTimersByTime(10100) })
-  expect(screen.queryByText('Boom')).toBeNull()
+  act(() => { vi.advanceTimersByTime(10 * 60_000) })
+  expect(screen.queryByText('Boom')).not.toBeNull()
+})
+
+test('a toast can ask for its own lifetime', () => {
+  mount(<Fire message="Resolving" options={{ ttl: 5000 }} />)
+  fire('Resolving')
+  act(() => { vi.advanceTimersByTime(4900) })
+  expect(screen.queryByText('Resolving')).not.toBeNull()
+  act(() => { vi.advanceTimersByTime(200) })
+  expect(screen.queryByText('Resolving')).toBeNull()
 })

@@ -60,3 +60,32 @@ test('equal keys keep their input order (stable)', () => {
   expect(ids(sortIncidents(items, 'component', 'asc'))).toEqual(['1', '2', '3'])
   expect(ids(sortIncidents(items, 'component', 'desc'))).toEqual(['1', '2', '3'])
 })
+
+describe('priority ties: most overdue first (step 3)', () => {
+  const active = (id, deadline, over = {}) => wi(id, { priority: 'P0', sla_deadline: deadline, ...over })
+
+  test('within P0 an older deadline sorts before a newer one, in both directions', () => {
+    const items = [active('new', '2026-01-02T00:00:00Z'), active('old', '2026-01-01T00:00:00Z'), wi('p1', { priority: 'P1' })]
+    expect(ids(sortIncidents(items, 'priority', 'asc'))).toEqual(['old', 'new', 'p1'])
+    expect(ids(sortIncidents(items, 'priority', 'desc'))).toEqual(['p1', 'old', 'new'])
+  })
+
+  test('a RESOLVED P0 and one with no deadline sort after active P0s that have a deadline', () => {
+    const items = [
+      active('none', null),
+      active('done', '2025-12-31T00:00:00Z', { status: 'RESOLVED' }),
+      active('late', '2026-01-02T00:00:00Z'),
+    ]
+    expect(ids(sortIncidents(items, 'priority', 'asc'))).toEqual(['late', 'none', 'done'])
+  })
+
+  test('equal deadlines keep their input order (stable)', () => {
+    const items = [active('1', '2026-01-01T00:00:00Z'), active('2', '2026-01-01T00:00:00Z'), active('3', '2026-01-01T00:00:00Z')]
+    expect(ids(sortIncidents(items, 'priority', 'asc'))).toEqual(['1', '2', '3'])
+  })
+
+  test('other keys do not use the deadline tie-break', () => {
+    const items = [wi('1', { component: 'SAME', sla_deadline: '2026-02-01T00:00:00Z' }), wi('2', { component: 'SAME', sla_deadline: '2026-01-01T00:00:00Z' })]
+    expect(ids(sortIncidents(items, 'component', 'asc'))).toEqual(['1', '2'])
+  })
+})

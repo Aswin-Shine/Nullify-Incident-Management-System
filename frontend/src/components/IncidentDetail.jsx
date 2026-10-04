@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { PriorityBadge, StatusBadge } from './Badges';
 import { RCAForm } from './RCAForm';
@@ -6,40 +6,119 @@ import { CommentsSection } from './CommentsSection';
 import { ErrorNote } from './ErrorNote';
 import { Icon } from './Icon';
 import {
-  fetchWorkItem, fetchSignals, fetchRCA, updateStatus, assignWorkItem, listUsers, errorMessage,
+  fetchWorkItem, fetchSignals, fetchRCA, fetchHistory, updateStatus, assignWorkItem, listUsers, errorMessage,
 } from '../api/client';
 import { useAuth, canWrite } from '../context/auth';
 import { useToast } from '../context/toast';
 import { useQuery } from '../hooks/useQuery';
 import { useNow } from '../hooks/useNow';
-import { fmtMTTR } from '../format';
+import { fmtMTTR, fmtStamp, toLocalInput, signalRate, breachAge, breachLevel, startedMessage, copyIncidentLink, rcaDue, shortAge } from '../format';
 
 const NEXT = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] };
 const TRANSITION_LABEL = { INVESTIGATING: 'Start Investigating', RESOLVED: 'Mark Resolved', CLOSED: 'Close Incident' };
-const SEVERITY_LEVEL = { CRITICAL: 'p0', HIGH: 'p1', MEDIUM: 'p2', LOW: 'p3' };
+const ACTIVE = ['OPEN', 'INVESTIGATING'];  // while active the signals lead; afterwards the RCA does
+const FINISHED = ['RESOLVED', 'CLOSED'];
+const SIGNALS_SHOWN = 5;
+const LIVE_MS = 15 * 60000;  // a signal group is "live" (its rate still means something) while its last signal is this recent
 
-function SlaChip({ deadline, status }) {
-  const now = useNow();
-  if (!deadline || ['RESOLVED', 'CLOSED'].includes(status)) return null;
-  const diff = new Date(deadline) - now;
-  if (diff <= 0) return <span className="sla-chip breached" data-level="p0">SLA BREACHED</span>;
-  const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
-  const level = diff < 300000 ? 'p0' : diff < 1800000 ? 'p2' : 'p3';
-  return <span className="sla-chip" data-level={level}>SLA {h > 0 ? `${h}h ` : ''}{m}m {s}s</span>;
+// One row per (message, severity), newest group first. `newestFirst` lists the signals newest first, so the first
+// signal met for a key is its latest and the last one met is its earliest.
+function groupSignals(newestFirst) {
+  const groups = new Map();
+  for (const s of newestFirst) {
+    const key = `${s.severity}|${s.message}`;
+    const g = groups.get(key);
+    if (g) { g.count += 1; g.first = s.timestamp; } else groups.set(key, { key, message: s.message, severity: s.severity, count: 1, first: s.timestamp, last: s.timestamp });
+  }
+  return [...groups.values()];
 }
 
-export function IncidentDetail({ id, onRefresh, refreshTick }) {
+// "HIGH · last 2 minutes ago · since Sep 29, 05:23 · ≈ 4/min". The rate only shows while the group is live.
+function SignalMeta({ g }) {
+  const now = useNow();
+  return (
+    <span className="signal-meta">
+      {[
+        g.severity,
+        g.last && `last ${formatDistanceToNow(new Date(g.last), { addSuffix: true })}`,
+        g.count > 1 && g.first && `since ${fmtStamp(g.first)}`,
+        g.count > 1 && now - new Date(g.last) < LIVE_MS && signalRate(g.count, g.first, g.last),
+      ].filter(Boolean).join(' · ')}
+    </span>
+  );
+}
+
+// The one-line state of an active incident: "P0 · SLA breached 5d 5h ago · no owner". Red marks only what needs
+// action now: a breach under an hour old, and no owner on a P0. The SLA part is left out when there is no deadline.
+function StateLine({ incident }) {
+  const now = useNow();
+  const { priority, sla_deadline: deadline, assignee_username: owner } = incident;
+  const diff = deadline ? new Date(deadline) - now : null;
+  let sla = null;
+  if (diff != null && diff <= 0) {
+    const level = breachLevel(deadline, now) === 'p0' ? 'p0' : undefined;
+    sla = <span key="sla" className="state-sla" data-level={level}>SLA breached {breachAge(deadline, now).slice(1)} ago</span>;  // slice drops the "+"
+  } else if (diff != null) {
+    const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
+    sla = <span key="sla" className="state-sla">SLA due in {h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`}</span>;
+  }
+  const parts = [
+    <span key="pri" className="state-pri">{priority}</span>,
+    sla,
+    <span key="owner" className="state-owner" data-level={!owner && priority === 'P0' ? 'p0' : undefined}>{owner ? `owned by ${owner}` : 'no owner'}</span>,
+  ].filter(Boolean);
+  return <p className="state-line">{parts.flatMap((p, i) => i ? [' · ', p] : [p])}</p>;
+}
+
+// A resolved incident still waiting for its RCA: "Resolved 3d ago · RCA overdue by 1d 3h" (or "RCA due in 1d 23h").
+function RcaLine({ incident }) {
+  const due = rcaDue(incident, useNow());
+  if (!due) return null;
+  return (
+    <p className="state-line">
+      Resolved {shortAge(incident.resolved_at)} ago · {due.overdue ? `RCA overdue by ${due.long}` : `RCA due in ${due.long}`}
+    </p>
+  );
+}
+
+// `onResolve(incident)` starts the owner's undoable resolve; `resolving` says one is pending for this incident.
+// `onOpened({ id, component, status, assignee_id })` reports the incident that loaded, for the list's note and the tab title.
+export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolving = false, onOpened }) {
   const { user } = useAuth();
   const write = canWrite(user);
-  const [signalsOpen, setSignalsOpen] = useState(false);
+  // The user's own toggle for one incident; any other incident starts at the default for its status.
+  const [signalsView, setSignalsView] = useState({ id: null, open: false, all: false });
   const [transitioning, setTransit] = useState(null);
+  const [assigningId, setAssigningId] = useState(null);  // the incident whose assignment request is in flight
+  const [confirmId, setConfirmId] = useState(null);  // the incident whose Close is awaiting confirmation
+  const cancelRef = useRef(null);
+  const closeRef = useRef(null);
+  const wasConfirming = useRef(false);
+  const h1Ref = useRef(null);
   const toast = useToast();
 
   const wi = useQuery(id, () => fetchWorkItem(id), refreshTick);
   const signals = useQuery(id, () => fetchSignals(id), refreshTick);
   const rca = useQuery(id, () => fetchRCA(id), refreshTick);
+  // A finished incident names who resolved and who closed it, from the status events. Active ones have nothing to read yet.
+  const history = useQuery(FINISHED.includes(wi.data?.status) ? `${id}:history` : null, () => fetchHistory(id), refreshTick);
   // Only people who can assign need the user list (viewers get a 403 for it).
   const users = useQuery(write ? 'users' : null, listUsers);
+
+  // Focus follows the inline confirm: Cancel when it opens, the Close button again when it is dismissed.
+  const confirming = confirmId === id;
+  useEffect(() => {
+    if (confirming) cancelRef.current?.focus();
+    else if (wasConfirming.current && confirmId === null) closeRef.current?.focus();  // not when the user moved to another incident
+    wasConfirming.current = confirming;
+  }, [confirming, confirmId]);
+  // Below 900px the list is hidden once an incident is open, so the heading takes the focus.
+  const loadedId = wi.data?.id;
+  useEffect(() => { if (loadedId && window.innerWidth < 900) h1Ref.current?.focus(); }, [loadedId]);
+  const loadedComponent = wi.data?.component, loadedStatus = wi.data?.status, loadedAssignee = wi.data?.assignee_id;
+  useEffect(() => {
+    if (loadedId) onOpened?.({ id: loadedId, component: loadedComponent, status: loadedStatus, assignee_id: loadedAssignee });
+  }, [loadedId, loadedComponent, loadedStatus, loadedAssignee, onOpened]);
 
   // A mutation returns the updated work item, so render it instead of refetching.
   const mutate = async (call, successMessage) => {
@@ -52,11 +131,21 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
       toast(errorMessage(e, 'Action failed'), { kind: 'error' });
     }
   };
-  const doTransition = async (status) => {
+  const doTransition = async (status, successMessage = updated => `Moved to ${updated.status}`) => {
     setTransit(status);
-    await mutate(() => updateStatus(id, status), updated => `Moved to ${updated.status}`);
+    await mutate(() => updateStatus(id, status), successMessage);
     setTransit(null);
   };
+  // One assignment at a time: the controls stay disabled until the request settles, success or error.
+  const assign = async (assigneeId) => {
+    if (assigningId === id) return;
+    setAssigningId(id);
+    await mutate(() => assignWorkItem(id, assigneeId), assigned);
+    setAssigningId(null);
+  };
+  // Starting an investigation claims an unowned incident for you; say so when the response shows it happened.
+  const started = updated => startedMessage(wi.data, updated, user.id);
+  const assigned = updated => updated.assignee_username ? `Assigned to ${updated.assignee_username}` : 'Incident unassigned';
 
   if (!id) return (
     <div className="empty-state detail-empty">
@@ -68,7 +157,7 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
 
   const incident = wi.data;
   if (!incident) {
-    if (wi.error) return <div className="detail"><ErrorNote>{errorMessage(wi.error, 'Could not load incident')}</ErrorNote></div>;
+    if (wi.error) return <div className="detail"><ErrorNote onRetry={wi.reload}>{errorMessage(wi.error, 'Could not load incident')}</ErrorNote></div>;
     return (
       <div className="detail-skeleton">
         {[200, 140, 100].map((w, i) => <div key={i} className="shimmer" style={{ height: 20, width: w }} />)}
@@ -76,115 +165,202 @@ export function IncidentDetail({ id, onRefresh, refreshTick }) {
     );
   }
 
-  const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(`${window.location.origin}/?incident=${incident.id}`);
-      toast('Link copied');
-    } catch {
-      toast('Could not copy the link', { kind: 'error' });  // no clipboard on plain http, or the browser refused
-    }
-  };
-
   const mttr = fmtMTTR(incident.mttr_seconds);
+  const closed = incident.status === 'CLOSED';
+  const category = rca.data?.root_cause_category;
+  const finished = FINISHED.includes(incident.status);
+  // Who moved the incident to `status`; '-' when there is no such event (before migration 0004), no actor, or no history.
+  const actorOf = (status) => history.data?.find(e => e.kind === 'status' && e.to_value === status)?.actor_username ?? '-';
+  const completion = closed ? `Closed${mttr ? ` · MTTR ${mttr}` : ''}` : mttr ? `Resolved · MTTR ${mttr}` : null;
+  const facts = [mttr && `MTTR ${mttr}`, category].filter(Boolean).join(' · ');
+  const confirmText = `Close ${incident.component}?${facts ? ` ${facts}.` : ''} The RCA locks once closed.`;
   const transitions = write ? NEXT[incident.status] || [] : [];
+  const closeBlocked = transitions.includes('CLOSED') && !rca.data;  // also while the RCA could not be loaded: we cannot tell
   const signalList = signals.data ?? [];
+  const active = ACTIVE.includes(incident.status);
+  const claimFirst = write && incident.status === 'INVESTIGATING' && !incident.assignee_id;
+  const view = signalsView.id === id ? signalsView : null;
+  const signalsOpen = view ? view.open : active;
+  const showAll = view?.all ?? false;
+  const newestFirst = [...signalList].reverse();  // the API sends the latest signals oldest first
+  const latest = newestFirst[0];
+  const groups = groupSignals(newestFirst);
   // Viewers cannot act on an incident, so only SREs and admins are offered.
+  const assigning = assigningId === id;
   const assignable = (users.data ?? []).filter(u => u.role !== 'viewer');
 
+  const signalsSection = (
+    <div className="signals" key="signals">
+      <h2>
+        <button type="button" className="btn-bare signals-toggle" aria-expanded={signalsOpen}
+          onClick={() => setSignalsView({ id, open: !signalsOpen, all: showAll })}>
+          <span className="signals-title">Signals ({(incident.signal_count ?? signalList.length).toLocaleString()})</span>
+          <span className="signals-caret"><Icon name="chevron-down" size={14} /></span>
+        </button>
+      </h2>
+      {signalsOpen && (
+        <div className="signal-list">
+          {(showAll ? groups : groups.slice(0, SIGNALS_SHOWN)).map(g => (
+            <div key={g.key} className="signal">
+              <span className="signal-dot" data-level={g.severity === 'CRITICAL' ? 'p0' : undefined} aria-hidden="true" />
+              <div className="signal-body">
+                <div className="signal-top">
+                  <span className="signal-msg" dir="auto">{g.message}</span>
+                  <span className="signal-count">×{g.count.toLocaleString()}</span>
+                </div>
+                <SignalMeta g={g} />
+              </div>
+            </div>
+          ))}
+          {signalList.length === 0 && <span className="muted">No signals yet.</span>}
+          {!showAll && groups.length > SIGNALS_SHOWN && (
+            <button type="button" className="btn-link" onClick={() => setSignalsView({ id, open: true, all: true })}>
+              Show all {groups.length} groups
+            </button>
+          )}
+          {incident.signal_count > signalList.length && signalList.length > 0 && (
+            <span className="muted-sm">showing the latest {signalList.length}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const rcaSection = (
+    <div key="rca">
+      {rca.error && !rca.data ? <ErrorNote>Could not load the RCA</ErrorNote> : !rca.loading && (
+        <RCAForm key={incident.id} workItem={incident} rca={rca.data} readOnly={!write}
+          defaultOpen={incident.status === 'RESOLVED'} locked={incident.status === 'OPEN'}
+          onSuccess={(created) => { rca.setData(created); toast('RCA submitted'); onRefresh?.(); }} />
+      )}
+    </div>
+  );
+
+  const timelineSection = <CommentsSection key={`timeline:${id}`} wiId={id} refreshTick={refreshTick} />;
+
+  // The DOM order is the visual order, so keyboard order matches what is on screen.
+  const sections = active ? [signalsSection, timelineSection, rcaSection] : [rcaSection, timelineSection, signalsSection];
+
   return (
-    <div className="detail">
+    <div className="detail" key={incident.id}>
       <div className="panel detail-card">
+        {completion && (
+          <p className="completion" title={mttr ? 'Time from the first signal to the RCA' : undefined}>
+            <Icon name="check" size={16} />
+            <span>{completion}</span>
+            {mttr && <span className="sr-only">, time from the first signal to the RCA</span>}
+          </p>
+        )}
         <div className="detail-badges">
-          <PriorityBadge priority={incident.priority} />
-          <StatusBadge status={incident.status} />
-          <div className="detail-badges-right">
-            {mttr && <span className="mttr-chip">MTTR {mttr}</span>}
-            <SlaChip deadline={incident.sla_deadline} status={incident.status} />
-          </div>
+          <PriorityBadge priority={incident.priority} muted={finished} />
+          {!completion && <StatusBadge status={incident.status} />}
         </div>
 
-        <h1>{incident.component}</h1>
+        <h1 ref={h1Ref} tabIndex={-1}>{incident.component}</h1>
+        {active && <StateLine incident={incident} />}
+        {!rca.data && <RcaLine incident={incident} />}
         <div className="detail-meta">
-          <span className="detail-id">{incident.id}</span>
-          <button type="button" className="btn-link copy-link" onClick={copyLink}>
+          <span className="detail-id" title={incident.id}>#{incident.id.slice(0, 8)}</span>
+          <button type="button" className="btn-link copy-link" onClick={() => copyIncidentLink(incident.id, toast)}>
             <Icon name="link" size={12} />Copy link
           </button>
-          <span>Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}</span>
+          {/* Created is news only when it differs from the first signal, to the minute */}
+          {toLocalInput(incident.created_at) !== toLocalInput(incident.start_time) && (
+            <span>Created {formatDistanceToNow(new Date(incident.created_at), { addSuffix: true })}</span>
+          )}
         </div>
 
-        <div className="action-bar">
-          <div className="assignee">
-            {incident.assignee_username && (
-              <div className="avatar avatar-lg">
-                {incident.assignee_username[0].toUpperCase()}
-              </div>
-            )}
-            {write ? (
-              <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''}
-                onChange={e => mutate(
-                  () => assignWorkItem(id, e.target.value || null),
-                  updated => updated.assignee_username ? `Assigned to ${updated.assignee_username}` : 'Incident unassigned')}>
-                <option value="">Unassigned</option>
-                {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
-                  <option value={incident.assignee_id}>{incident.assignee_username}</option>
-                )}
-                {assignable.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
-              </select>
-            ) : incident.assignee_username ? (
-              <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
-            ) : (
-              <span className="assignee-text">Unassigned</span>
-            )}
-          </div>
-
-          {transitions.length > 0 && (
-            <div className="transitions">
-              {transitions.map(st => {
-                const blocked = st === 'CLOSED' && !rca.data;
-                return (
-                  <button type="button" key={st} className="transition-btn" data-to={st} data-blocked={blocked}
-                    onClick={() => doTransition(st)} disabled={!!transitioning || blocked}
-                    title={blocked ? 'Submit RCA first' : ''}>
-                    {transitioning === st ? <span className="spinner" /> : TRANSITION_LABEL[st]}
-                  </button>
-                );
-              })}
+        <div className="detail-facts">
+          <dl className="detail-summary">
+            <div><dt>First signal</dt><dd>{fmtStamp(incident.start_time)}</dd></div>
+            <div>
+              <dt>Last signal</dt>
+              <dd title={fmtStamp(incident.last_signal_at)}>
+                {incident.last_signal_at ? formatDistanceToNow(new Date(incident.last_signal_at), { addSuffix: true }) : '-'}
+              </dd>
+            </div>
+            <div><dt>Signals</dt><dd>{(incident.signal_count ?? signalList.length).toLocaleString()}</dd></div>
+            {finished && <div><dt>Resolved by</dt><dd>{actorOf('RESOLVED')}</dd></div>}
+            {closed && <div><dt>Closed by</dt><dd>{actorOf('CLOSED')}</dd></div>}
+          </dl>
+          {latest && !closed && (
+            <div className="detail-latest">
+              <span className="micro">Latest</span>
+              <p title={latest.message} dir="auto">{latest.message}</p>
             </div>
           )}
         </div>
-      </div>
 
-      <div className="signals">
-        <button type="button" className="btn-bare signals-toggle" aria-expanded={signalsOpen}
-          onClick={() => setSignalsOpen(o => !o)}>
-          <span className="signals-title">Signals ({signalList.length})</span>
-          <span className="signals-caret"><Icon name="chevron-down" size={14} /></span>
-        </button>
-        {signalsOpen && (
-          <div className="signal-list">
-            {signalList.map(s => (
-              <div key={s.id} className="signal">
-                <span className="signal-dot" data-level={SEVERITY_LEVEL[s.severity] ?? 'p2'} aria-hidden="true" />
-                <span className="signal-msg">{s.message}</span>
-                <span className="signal-meta">
-                  {[s.severity, s.timestamp && formatDistanceToNow(new Date(s.timestamp), { addSuffix: true })].filter(Boolean).join(' · ')}
-                </span>
+        {!closed && (
+          <div className="action-bar">
+            <div className="assignee">
+              {incident.assignee_username && (
+                <div className="avatar avatar-lg">
+                  {incident.assignee_username[0].toUpperCase()}
+                </div>
+              )}
+              {write ? (
+                <select name="assignee" aria-label="Assign to" className="assign-select" value={incident.assignee_id ?? ''} disabled={assigning}
+                  onChange={e => assign(e.target.value || null)}>
+                  <option value="">Unassigned</option>
+                  {incident.assignee_id && !assignable.some(u => u.id === incident.assignee_id) && (
+                    <option value={incident.assignee_id}>{incident.assignee_username}</option>
+                  )}
+                  {assignable.map(u => <option key={u.id} value={u.id}>{u.username} ({u.role})</option>)}
+                </select>
+              ) : incident.assignee_username ? (
+                <span className="assignee-text">Assigned to <strong>{incident.assignee_username}</strong></span>
+              ) : (
+                <span className="assignee-text">Unassigned</span>
+              )}
+              {write && incident.assignee_id !== user.id && (
+                <button type="button" className={claimFirst ? 'btn btn-primary assign-me' : 'btn-link assign-me'} disabled={assigning} onClick={() => assign(user.id)}>
+                  Assign to me
+                </button>
+              )}
+            </div>
+
+            {transitions.length > 0 && (confirming ? (
+              // An inline confirm, not a modal: Close is final, but nothing here needs protected focus.
+              // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+              <div className="close-confirm" onKeyDown={e => { if (e.key === 'Escape') setConfirmId(null); }}>
+                <p>{confirmText}</p>
+                <div className="close-confirm-actions">
+                  <button type="button" ref={cancelRef} className="btn btn-secondary" onClick={() => setConfirmId(null)}>Cancel</button>
+                  <button type="button" className="btn btn-primary" disabled={!!transitioning}
+                    onClick={async () => {
+                      await doTransition('CLOSED', updated => `Closed ${updated.component}${fmtMTTR(updated.mttr_seconds) ? ` · MTTR ${fmtMTTR(updated.mttr_seconds)}` : ''}`);
+                      setConfirmId(null);
+                    }}>
+                    {transitioning === 'CLOSED' ? <span className="spinner" /> : 'Close incident'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="transitions">
+                {transitions.map(st => {
+                  const blocked = st === 'CLOSED' && closeBlocked;
+                  const pendingResolve = st === 'RESOLVED' && resolving;
+                  // Claiming comes first: while nobody owns an investigation, Assign to me leads and Resolve steps back.
+                  const secondary = st === 'RESOLVED' && claimFirst;
+                  return (
+                    <button type="button" key={st} ref={st === 'CLOSED' ? closeRef : undefined} className={`btn ${secondary ? 'btn-secondary' : 'btn-primary'} transition-btn`} data-to={st} data-blocked={blocked}
+                      onClick={() => st === 'CLOSED' ? setConfirmId(id) : st === 'RESOLVED' ? onResolve?.(incident) : doTransition(st, st === 'INVESTIGATING' ? started : undefined)}
+                      disabled={!!transitioning || blocked || pendingResolve}>
+                      {transitioning === st ? <span className="spinner" /> : pendingResolve ? 'Resolving…' : TRANSITION_LABEL[st]}
+                    </button>
+                  );
+                })}
               </div>
             ))}
-            {signalList.length === 0 && <span className="muted">No signals yet.</span>}
           </div>
+        )}
+        {closeBlocked && !rca.loading && (
+          <p className="transition-hint">{rca.error ? 'Could not check the RCA.' : 'Submit the RCA to close.'}</p>
         )}
       </div>
 
-      <hr className="divider" />
-      <div className="detail-section">
-        {!rca.loading && (
-          <RCAForm key={incident.id} workItem={incident} rca={rca.data} readOnly={!write}
-            onSuccess={(created) => { rca.setData(created); toast('RCA submitted'); onRefresh?.(); }} />
-        )}
-      </div>
-      <hr className="divider" />
-      <CommentsSection wiId={id} refreshTick={refreshTick} />
+      {sections}
     </div>
   );
 }

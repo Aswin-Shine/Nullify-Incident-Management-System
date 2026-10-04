@@ -26,3 +26,6 @@ export const workItem = (over = {}) => ({
 })
 
 export const httpError = (status, detail) => ({ response: { status, data: { detail } } })
+
+// What axios throws when the server cannot be reached: an AxiosError with no `response`.
+export const networkError = () => Object.assign(new Error('Network Error'), { isAxiosError: true })

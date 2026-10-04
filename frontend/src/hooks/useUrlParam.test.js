@@ -24,6 +24,18 @@ test('setting a value pushes a history entry and updates the URL', () => {
   push.mockRestore()
 })
 
+test('setting with { replace: true } rewrites the current entry instead of adding one', () => {
+  const push = vi.spyOn(window.history, 'pushState')
+  const replace = vi.spyOn(window.history, 'replaceState')
+  const { result } = renderHook(() => useUrlParam('incident'))
+  act(() => result.current[1]('xyz', { replace: true }))
+  expect(result.current[0]).toBe('xyz')
+  expect(window.location.search).toBe('?incident=xyz')
+  expect(replace).toHaveBeenCalledTimes(1)
+  expect(push).not.toHaveBeenCalled()
+  push.mockRestore(); replace.mockRestore()
+})
+
 test('setting null removes the param', () => {
   window.history.replaceState(null, '', '/?incident=abc&other=1')
   const { result } = renderHook(() => useUrlParam('incident'))

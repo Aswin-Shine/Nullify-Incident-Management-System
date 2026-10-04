@@ -56,9 +56,10 @@ function ApiKeyCard() {
   const [key, setKey] = useState(null);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const generate = async () => {
-    setError(''); setCopied(false);
+    setError(''); setCopied(false); setConfirming(false);
     try {
       setKey((await rotateApiKey()).api_key);
       setUser(u => ({ ...u, has_api_key: true }));
@@ -86,7 +87,17 @@ function ApiKeyCard() {
       )}
       {key && <div className="note-warn"><p>This key will not be shown again.</p></div>}
       {error && <ErrorNote>{error}</ErrorNote>}
-      <button type="button" className="btn btn-secondary" onClick={generate}>Generate key</button>
+      {confirming ? (
+        <div className="key-confirm">
+          <p>This disables your current key. Producers using it will start getting 401.</p>
+          <div className="confirm-actions">
+            <button type="button" className="btn btn-secondary" onClick={() => setConfirming(false)}>Cancel</button>
+            <button type="button" className="btn btn-primary" onClick={generate}>Generate new key</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="btn btn-secondary" onClick={user?.has_api_key ? () => setConfirming(true) : generate}>Generate key</button>
+      )}
     </section>
   );
 }
@@ -111,6 +122,7 @@ function AlertsCard() {
 export function AccountPanel() {
   return (
     <div className="panel-page">
+      <h1 className="page-title">Account</h1>
       <PasswordCard />
       <ApiKeyCard />
       {typeof Notification !== 'undefined' && <AlertsCard />}

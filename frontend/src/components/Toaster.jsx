@@ -3,15 +3,18 @@ import { ToastContext } from '../context/toast';
 import { Icon } from './Icon';
 
 const MAX_TOASTS = 3;
-const TTL_MS = { alert: 10000 };  // a new P0 stays longer than a "Saved"
 const DEFAULT_TTL_MS = 4000;
+// An alert (a new P0) stays until someone dismisses or opens it; a toast may also ask for its own `ttl`.
+const ttlFor = ({ kind, ttl }) => ttl ?? (kind === 'alert' ? null : DEFAULT_TTL_MS);
 
 function Toast({ toast, onDismiss }) {
   const { id, message, kind, action } = toast;
+  const ttl = ttlFor(toast);
   useEffect(() => {
-    const t = setTimeout(() => onDismiss(id), TTL_MS[kind] ?? DEFAULT_TTL_MS);
+    if (ttl == null) return undefined;
+    const t = setTimeout(() => onDismiss(id), ttl);
     return () => clearTimeout(t);
-  }, [id, kind, onDismiss]);
+  }, [id, ttl, onDismiss]);
 
   return (
     <div className="toast" data-kind={kind} role={kind === 'alert' ? 'alert' : undefined}>
@@ -31,9 +34,9 @@ export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const nextId = useRef(0);
   const dismiss = useCallback((id) => setToasts(list => list.filter(t => t.id !== id)), []);
-  const toast = useCallback((message, { kind = 'success', action } = {}) => {
+  const toast = useCallback((message, { kind = 'success', action, ttl } = {}) => {
     const id = ++nextId.current;
-    setToasts(list => [...list, { id, message, kind, action }].slice(-MAX_TOASTS));
+    setToasts(list => [...list, { id, message, kind, action, ttl }].slice(-MAX_TOASTS));
   }, []);
 
   return (

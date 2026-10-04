@@ -9,14 +9,19 @@ function wsUrl() {
 
 const POLICY_VIOLATION = 1008; // server rejected our auth, usually an expired access token
 
-export function useWebSocket(onMessage) {
+// `onReconnect` fires when the socket is authenticated again after a drop: events sent meanwhile are gone.
+// `onStatus` hears 'connecting' (before the first auth_ok), 'live' (after any auth_ok) and 'reconnecting' (after a close, until the next auth_ok).
+export function useWebSocket(onMessage, onReconnect, onStatus) {
   const onMessageRef = useRef(onMessage);
-  useEffect(() => { onMessageRef.current = onMessage; });
+  const onReconnectRef = useRef(onReconnect);
+  const onStatusRef = useRef(onStatus);
+  useEffect(() => { onMessageRef.current = onMessage; onReconnectRef.current = onReconnect; onStatusRef.current = onStatus; });
 
   useEffect(() => {
     let ws;
     let retry;
     let stopped = false;
+    let dropped = false;
 
     const scheduleReconnect = () => { retry = setTimeout(connect, 3000); };
 
@@ -32,15 +37,20 @@ export function useWebSocket(onMessage) {
           console.warn('Ignoring malformed WebSocket message', e.data);
           return;
         }
-        if (data.event !== 'auth_ok') onMessageRef.current(data);
+        if (data.event !== 'auth_ok') { onMessageRef.current(data); return; }
+        onStatusRef.current?.('live');
+        if (dropped) { dropped = false; onReconnectRef.current?.(); }
       };
       ws.onclose = (e) => {
         if (stopped) return; // unmounted: do not resurrect the socket
+        dropped = true;
+        onStatusRef.current?.('reconnecting');
         if (e.code === POLICY_VIOLATION) refreshSession().then(scheduleReconnect, scheduleReconnect);
         else scheduleReconnect();
       };
     }
 
+    onStatusRef.current?.('connecting');
     connect();
     return () => {
       stopped = true;
