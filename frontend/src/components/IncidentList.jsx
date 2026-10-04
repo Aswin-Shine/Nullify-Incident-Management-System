@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { Button, Dropdown, Header, Label, Separator } from '@heroui/react';
 import { shortAge, breachAge, breachAgeWords, breachLevel, plural, rcaDue } from '../format';
 import { sortIncidents } from '../sort';
 import { fetchWorkItems, errorMessage } from '../api/client';
@@ -10,14 +11,8 @@ import { Icon } from './Icon';
 
 const FILTERS = ['ACTIVE', 'RESOLVED', 'CLOSED', 'ALL'];  // ACTIVE is OPEN or INVESTIGATING (the server knows it)
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
-const COLUMNS = [
-  { key: 'priority', label: 'Priority', text: 'Pri' },
-  { key: 'component', label: 'Component', text: 'Component' },
-  { key: 'status', label: 'Status', text: 'Status' },
-  { key: 'sla', label: 'SLA', text: 'SLA' },
-  { key: 'assignee', label: 'Assignee', text: 'Assignee' },
-  { key: 'age', label: 'Age', text: 'Age' },
-];
+const SORT_KEYS = [['priority', 'Priority'], ['sla', 'SLA'], ['age', 'Age'], ['component', 'Component'], ['status', 'Status'], ['assignee', 'Assignee']];
+const SORT_LABEL = Object.fromEntries(SORT_KEYS);
 const DEBOUNCE_MS = 300;
 const PAGE = 100;
 const MAX_LIMIT = 500;  // ponytail: past this, narrow with the status pills; API clients can walk next_cursor
@@ -50,7 +45,11 @@ export function IncidentList({ view, setView, onSelect, selectedId, selectedInfo
   const filtered = filter !== 'ACTIVE' || q || priority || mine;
   // Sorting is client-side over the loaded rows, and j/k follow what is on screen.
   const incidents = useMemo(() => sortIncidents(data?.items ?? [], sort.key, sort.dir), [data, sort]);
-  const clickSort = (key) => patch({ sort: sort.key !== key ? { key, dir: 'asc' } : { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } });
+  // A new key starts ascending; the order section flips the direction of the current key.
+  const pickSort = (key) => patch({ sort: { key, dir: sort.key === key ? sort.dir : 'asc' } });
+  const pickDir = (dir) => patch({ sort: { ...sort, dir } });
+  // The Filters button names what is active, so a filtered view is never silent.
+  const active = [priority, mine && 'assigned to me'].filter(Boolean);
 
   const critical = incidents.filter(isCritical);
   const p0Count = critical.length;
@@ -103,17 +102,12 @@ export function IncidentList({ view, setView, onSelect, selectedId, selectedInfo
       </div>
 
       <div className="list-toolbar">
-        <div className="pills">
-          <div className="seg">
-            {FILTERS.map(f => (
-              <button type="button" key={f} className="pill" aria-pressed={filter === f} onClick={() => { patch({ status: f }); setLimit(PAGE); }}>
-                {f[0] + f.slice(1).toLowerCase()}
-              </button>
-            ))}
-          </div>
-          <button type="button" className="pill" aria-pressed={mine} onClick={() => { patch({ mine: !mine }); setLimit(PAGE); }}>
-            Assigned to me
-          </button>
+        <div className="seg" role="group" aria-label="Status">
+          {FILTERS.map(f => (
+            <button type="button" key={f} className="pill" aria-pressed={filter === f} onClick={() => { patch({ status: f }); setLimit(PAGE); }}>
+              {f[0] + f.slice(1).toLowerCase()}
+            </button>
+          ))}
         </div>
 
         <div className="filter-row">
@@ -123,30 +117,62 @@ export function IncidentList({ view, setView, onSelect, selectedId, selectedInfo
               value={search} onChange={e => patch({ search: e.target.value })} />
             <kbd className="kbd" aria-hidden="true">/</kbd>
           </span>
-          <select name="priority" aria-label="Priority" value={priority}
-            onChange={e => { patch({ priority: e.target.value }); setLimit(PAGE); }}>
-            <option value="">All priorities</option>
-            {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
-          </select>
+
+          <Dropdown>
+            <Button variant="secondary" size="sm" className="tool-btn" data-active={active.length > 0 || undefined}
+              aria-label={active.length ? `Filters: ${active.join(', ')}` : 'Filters'}>
+              <Icon name="filter" size={14} />
+              <span className="tool-label">Filters</span>
+              {active.length > 0 && <span className="tool-count" aria-hidden="true">{active.length}</span>}
+            </Button>
+            <Dropdown.Popover placement="bottom end" className="list-menu">
+              <Dropdown.Menu aria-label="Filters">
+                <Dropdown.Section selectionMode="single" disallowEmptySelection selectedKeys={new Set([priority || 'any'])}
+                  onSelectionChange={(keys) => { const [k] = keys; patch({ priority: k === 'any' ? '' : k }); setLimit(PAGE); }}>
+                  <Header>Priority</Header>
+                  {['any', ...PRIORITIES].map(p => (
+                    <Dropdown.Item key={p} id={p} textValue={p === 'any' ? 'Any priority' : p}>
+                      <Label>{p === 'any' ? 'Any priority' : p}</Label><Dropdown.ItemIndicator />
+                    </Dropdown.Item>
+                  ))}
+                </Dropdown.Section>
+                <Separator />
+                <Dropdown.Section selectionMode="multiple" selectedKeys={new Set(mine ? ['mine'] : [])}
+                  onSelectionChange={(keys) => { patch({ mine: keys === 'all' || keys.has('mine') }); setLimit(PAGE); }}>
+                  <Header>Owner</Header>
+                  <Dropdown.Item id="mine" textValue="Assigned to me"><Label>Assigned to me</Label><Dropdown.ItemIndicator /></Dropdown.Item>
+                </Dropdown.Section>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
+
+          <Dropdown>
+            <Button variant="secondary" size="sm" className="tool-btn" isIconOnly
+              aria-label={`Sort: ${SORT_LABEL[sort.key]}, ${sort.dir === 'asc' ? 'ascending' : 'descending'}`}>
+              <Icon name="arrow-up-down" size={14} />
+            </Button>
+            <Dropdown.Popover placement="bottom end" className="list-menu">
+              <Dropdown.Menu aria-label="Sort">
+                <Dropdown.Section selectionMode="single" disallowEmptySelection selectedKeys={new Set([sort.key])}
+                  onSelectionChange={(keys) => { const [k] = keys; if (k) pickSort(k); }}>
+                  <Header>Sort by</Header>
+                  {SORT_KEYS.map(([key, label]) => (
+                    <Dropdown.Item key={key} id={key} textValue={label}><Label>{label}</Label><Dropdown.ItemIndicator /></Dropdown.Item>
+                  ))}
+                </Dropdown.Section>
+                <Separator />
+                <Dropdown.Section selectionMode="single" disallowEmptySelection selectedKeys={new Set([sort.dir])}
+                  onSelectionChange={(keys) => { const [k] = keys; if (k) pickDir(k); }}>
+                  <Header>Order</Header>
+                  <Dropdown.Item id="asc" textValue="Ascending"><Label>Ascending</Label><Dropdown.ItemIndicator /></Dropdown.Item>
+                  <Dropdown.Item id="desc" textValue="Descending"><Label>Descending</Label><Dropdown.ItemIndicator /></Dropdown.Item>
+                </Dropdown.Section>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
         </div>
       </div>
 
-      <div className="row-grid sort-head" role="group" aria-label="Sort incidents">
-        {COLUMNS.map(c => {
-          const active = sort.key === c.key;
-          return (
-            // aria-description is valid ARIA 1.3 on any role; the lint plugin's table predates it
-            // eslint-disable-next-line jsx-a11y/role-supports-aria-props
-            <button type="button" key={c.key} className="sort-btn" data-col={c.key} aria-label={`Sort by ${c.label}`}
-              aria-pressed={active}
-              aria-description={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
-              onClick={() => clickSort(c.key)}>
-              {c.text}
-              {active && <Icon name={sort.dir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} />}
-            </button>
-          );
-        })}
-      </div>
       {data?.next_cursor && (
         <div className="list-hint">Sorted within the {incidents.length} loaded</div>
       )}
@@ -166,34 +192,33 @@ export function IncidentList({ view, setView, onSelect, selectedId, selectedInfo
             <div className="empty-sub">{filtered ? 'No incidents match these filters.' : 'All quiet, systems nominal.'}</div>
           </div>
         ) : incidents.map(incident => (
-          <button type="button" key={incident.id} className="btn-bare incident-row row-grid" data-incident-id={incident.id}
+          <button type="button" key={incident.id} className="btn-bare incident-row" data-incident-id={incident.id}
             data-selected={incident.id === selectedId} aria-current={incident.id === selectedId ? 'true' : undefined}
             onClick={() => onSelect(incident.id)}>
-            <span className="cell" data-col="priority"><PriorityBadge priority={incident.priority} short /></span>
-            <span className="cell cell-comp" data-col="component">
-              <span className="row-component" title={incident.component}>{incident.component}</span>
+            <span className="row-line">
+              <span className="cell" data-col="priority"><PriorityBadge priority={incident.priority} short /></span>
+              <span className="row-component" data-col="component" title={incident.component}>{incident.component}</span>
+              <span className="cell row-sla" data-col="sla">
+                {incident.sla_deadline && !['RESOLVED', 'CLOSED'].includes(incident.status) && (
+                  <SlaTimer deadline={incident.sla_deadline} />
+                )}
+                {incident.status === 'RESOLVED' && <RcaMarker incident={incident} />}
+              </span>
             </span>
-            <span className="cell" data-col="status"><StatusBadge status={incident.status} /></span>
-            <span className="cell" data-col="sla">
-              {incident.sla_deadline && !['RESOLVED', 'CLOSED'].includes(incident.status) && (
-                <SlaTimer deadline={incident.sla_deadline} />
-              )}
-              {incident.status === 'RESOLVED' && <RcaMarker incident={incident} />}
+            <span className="row-line row-meta">
+              <span className="cell" data-col="status"><StatusBadge status={incident.status} /></span>
+              <span className="row-sep" aria-hidden="true">·</span>
+              <span className="cell row-assignee" data-col="assignee" data-unowned={isCritical(incident) && !incident.assignee_id ? 'true' : undefined}>
+                {incident.assignee_username ?? (
+                  <>
+                    {isCritical(incident) && <span className="unowned-ring" aria-hidden="true" />}
+                    Unassigned
+                  </>
+                )}
+              </span>
+              <span className="row-sep" aria-hidden="true">·</span>
+              <span className="cell row-age" data-col="age">{shortAge(incident.created_at)}</span>
             </span>
-            <span className="cell row-assignee" data-col="assignee" data-unowned={isCritical(incident) && !incident.assignee_id ? 'true' : undefined}>
-              {incident.assignee_username ? (
-                <>
-                  <span className="avatar avatar-sm" aria-hidden="true">{incident.assignee_username[0].toUpperCase()}</span>
-                  <span className="row-assignee-name">{incident.assignee_username}</span>
-                </>
-              ) : (
-                <>
-                  {isCritical(incident) && <span className="unowned-ring" aria-hidden="true" />}
-                  Unassigned
-                </>
-              )}
-            </span>
-            <span className="cell row-age" data-col="age">{shortAge(incident.created_at)}</span>
           </button>
         ))}
         {data?.next_cursor && limit < MAX_LIMIT && (

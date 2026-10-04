@@ -9,10 +9,12 @@ export const PriorityBadge = ({ priority, short = false, muted = false }) => {
   return <span className="chip" data-level={level.toLowerCase()} data-muted={muted || undefined}>{short ? level : LABELS[level]}</span>;
 };
 
+const STATUS_WORD = { OPEN: 'Open', INVESTIGATING: 'Investigating', RESOLVED: 'Resolved', CLOSED: 'Closed' };
+
 // Status is neutral text plus a shape (ring, half dot, check, dot), never a hue: severity is the only chroma.
 export const StatusBadge = ({ status }) => (
   <span className="status" data-status={status}>
     {status === 'RESOLVED' ? <Icon name="check" size={12} /> : <span className="status-shape" aria-hidden="true" />}
-    <span className="status-word">{status}</span>
+    <span className="status-word">{STATUS_WORD[status] ?? status}</span>
   </span>
 );

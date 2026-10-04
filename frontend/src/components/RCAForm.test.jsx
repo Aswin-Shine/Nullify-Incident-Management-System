@@ -15,16 +15,16 @@ beforeEach(() => {
 const change = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
 
 async function fillValid(start = '2026-01-01T10:00', end = '2026-01-01T12:00') {
-  change('Impact Start', start)
-  change('Impact End', end)
-  await userEvent.selectOptions(screen.getByLabelText('Root Cause Category'), 'Code Defect')
-  await userEvent.type(screen.getByLabelText('Fix Applied'), 'Restarted')
-  await userEvent.type(screen.getByLabelText('Prevention Steps'), 'Failover')
+  change('Impact start', start)
+  change('Impact end', end)
+  await userEvent.selectOptions(screen.getByLabelText('Root cause category'), 'Code Defect')
+  await userEvent.type(screen.getByLabelText('Fix applied'), 'Restarted')
+  await userEvent.type(screen.getByLabelText('Prevention steps'), 'Failover')
 }
 
 test('every input has a label (F-09)', () => {
   render(<RCAForm workItem={workItem()} rca={null} />)
-  for (const l of ['Impact Start', 'Impact End', 'Root Cause Category', 'Fix Applied', 'Prevention Steps']) {
+  for (const l of ['Impact start', 'Impact end', 'Root cause category', 'Fix applied', 'Prevention steps']) {
     expect(screen.getByLabelText(l)).toBeTruthy()
   }
 })
@@ -79,21 +79,21 @@ const inputIso = (label) => new Date(screen.getByLabelText(label).value).toISOSt
 
 test('with no RCA the impact window is pre-filled from the first and last signal', () => {
   render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
-  expect(inputIso('Impact Start')).toBe(START)
-  expect(inputIso('Impact End')).toBe(LAST)
+  expect(inputIso('Impact start')).toBe(START)
+  expect(inputIso('Impact end')).toBe(LAST)
 })
 
 test('the impact end falls back to the start when there is no last signal', () => {
   render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: null })} rca={null} />)
-  expect(inputIso('Impact End')).toBe(START)
+  expect(inputIso('Impact end')).toBe(START)
 })
 
 test('submitting without touching the times sends the pre-filled instants', async () => {
   api.submitRCA.mockResolvedValue({ id: 'r1' })
   render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
-  await userEvent.selectOptions(screen.getByLabelText('Root Cause Category'), 'Code Defect')
-  await userEvent.type(screen.getByLabelText('Fix Applied'), 'Restarted')
-  await userEvent.type(screen.getByLabelText('Prevention Steps'), 'Failover')
+  await userEvent.selectOptions(screen.getByLabelText('Root cause category'), 'Code Defect')
+  await userEvent.type(screen.getByLabelText('Fix applied'), 'Restarted')
+  await userEvent.type(screen.getByLabelText('Prevention steps'), 'Failover')
   await userEvent.click(screen.getByRole('button', { name: 'Submit RCA' }))
   expect(api.submitRCA).toHaveBeenCalledWith('wi-1', expect.objectContaining({ incident_start: START, incident_end: LAST }))
 })
@@ -146,21 +146,21 @@ test('with defaultOpen false the form hides behind "Write RCA" until clicked', a
 test('a collapsed form that becomes default-open (RESOLVED) expands without losing typed text', async () => {
   const { rerender } = render(<RCAForm workItem={workItem()} rca={null} defaultOpen={false} />)
   await userEvent.click(screen.getByRole('button', { name: 'Write RCA' }))
-  await userEvent.type(screen.getByLabelText('Fix Applied'), 'draft')
+  await userEvent.type(screen.getByLabelText('Fix applied'), 'draft')
   rerender(<RCAForm workItem={workItem()} rca={null} defaultOpen />)
-  expect(screen.getByLabelText('Fix Applied').value).toBe('draft')
+  expect(screen.getByLabelText('Fix applied').value).toBe('draft')
 })
 
 describe('second critique: RCA form', () => {
   test('the category starts on a disabled placeholder and the form cannot be submitted without one', async () => {
     render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
-    const select = screen.getByLabelText('Root Cause Category')
+    const select = screen.getByLabelText('Root cause category')
     expect(select.value).toBe('')
     expect(select.required).toBe(true)
     const placeholder = screen.getByRole('option', { name: 'Choose a category' })
     expect(placeholder.disabled).toBe(true)
-    await userEvent.type(screen.getByLabelText('Fix Applied'), 'Restarted')
-    await userEvent.type(screen.getByLabelText('Prevention Steps'), 'Failover')
+    await userEvent.type(screen.getByLabelText('Fix applied'), 'Restarted')
+    await userEvent.type(screen.getByLabelText('Prevention steps'), 'Failover')
     await userEvent.click(screen.getByRole('button', { name: 'Submit RCA' }))
     expect(api.submitRCA).not.toHaveBeenCalled()
   })
@@ -168,11 +168,11 @@ describe('second critique: RCA form', () => {
   test('Cancel collapses a form the user opened and keeps what was typed', async () => {
     render(<RCAForm workItem={workItem()} rca={null} defaultOpen={false} />)
     await userEvent.click(screen.getByRole('button', { name: 'Write RCA' }))
-    await userEvent.type(screen.getByLabelText('Fix Applied'), 'draft')
+    await userEvent.type(screen.getByLabelText('Fix applied'), 'draft')
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByLabelText('Fix Applied')).toBeNull()
+    expect(screen.queryByLabelText('Fix applied')).toBeNull()
     await userEvent.click(screen.getByRole('button', { name: 'Write RCA' }))
-    expect(screen.getByLabelText('Fix Applied').value).toBe('draft')
+    expect(screen.getByLabelText('Fix applied').value).toBe('draft')
   })
 
   test('a form that is open by default has no Cancel', () => {
@@ -184,11 +184,11 @@ describe('second critique: RCA form', () => {
     api.submitRCA.mockResolvedValue({ id: 'r1' })
     render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
     expect(screen.queryByText(/Starts before the first signal/)).toBeNull()  // the pre-filled start is the first signal
-    change('Impact Start', '2026-03-03T09:00')
+    change('Impact start', '2026-03-03T09:00')
     expect(screen.getByText(`Starts before the first signal (${fmtStamp(START)}).`)).toBeTruthy()
-    await userEvent.selectOptions(screen.getByLabelText('Root Cause Category'), 'Code Defect')
-    await userEvent.type(screen.getByLabelText('Fix Applied'), 'x')
-    await userEvent.type(screen.getByLabelText('Prevention Steps'), 'y')
+    await userEvent.selectOptions(screen.getByLabelText('Root cause category'), 'Code Defect')
+    await userEvent.type(screen.getByLabelText('Fix applied'), 'x')
+    await userEvent.type(screen.getByLabelText('Prevention steps'), 'y')
     await userEvent.click(screen.getByRole('button', { name: 'Submit RCA' }))
     expect(api.submitRCA).toHaveBeenCalledTimes(1)
   })
@@ -197,19 +197,19 @@ describe('second critique: RCA form', () => {
     api.submitRCA.mockResolvedValue({ id: 'r1' })
     render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
     expect(screen.queryByText(/Ends before the first signal/)).toBeNull()  // the pre-filled end is the last signal
-    change('Impact Start', '2026-03-03T07:00')
-    change('Impact End', '2026-03-03T09:00')
+    change('Impact start', '2026-03-03T07:00')
+    change('Impact end', '2026-03-03T09:00')
     expect(screen.getByText(`Ends before the first signal (${fmtStamp(START)}).`)).toBeTruthy()
-    await userEvent.selectOptions(screen.getByLabelText('Root Cause Category'), 'Code Defect')
-    await userEvent.type(screen.getByLabelText('Fix Applied'), 'x')
-    await userEvent.type(screen.getByLabelText('Prevention Steps'), 'y')
+    await userEvent.selectOptions(screen.getByLabelText('Root cause category'), 'Code Defect')
+    await userEvent.type(screen.getByLabelText('Fix applied'), 'x')
+    await userEvent.type(screen.getByLabelText('Prevention steps'), 'y')
     await userEvent.click(screen.getByRole('button', { name: 'Submit RCA' }))
     expect(api.submitRCA).toHaveBeenCalledTimes(1)
   })
 
   test('an end after the first signal has no end warning', () => {
     render(<RCAForm workItem={workItem({ start_time: START, last_signal_at: LAST })} rca={null} />)
-    change('Impact End', '2026-03-06T12:30')
+    change('Impact end', '2026-03-06T12:30')
     expect(screen.queryByText(/Ends before the first signal/)).toBeNull()
   })
 
@@ -223,8 +223,8 @@ describe('second critique: RCA form', () => {
 
 test('the free-text fields stop at the backend limit of 8000 characters', () => {
   render(<RCAForm workItem={workItem({ status: 'INVESTIGATING' })} rca={null} />)
-  expect(screen.getByLabelText('Fix Applied').maxLength).toBe(8000)
-  expect(screen.getByLabelText('Prevention Steps').maxLength).toBe(8000)
+  expect(screen.getByLabelText('Fix applied').maxLength).toBe(8000)
+  expect(screen.getByLabelText('Prevention steps').maxLength).toBe(8000)
 })
 
 test('the saved free text reads with dir=auto so Arabic or Hebrew aligns right', () => {

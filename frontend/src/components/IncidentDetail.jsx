@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
+import { Tabs } from '@heroui/react';
 import { PriorityBadge, StatusBadge } from './Badges';
 import { RCAForm } from './RCAForm';
 import { CommentsSection } from './CommentsSection';
@@ -15,8 +16,8 @@ import { useNow } from '../hooks/useNow';
 import { fmtMTTR, fmtStamp, toLocalInput, signalRate, breachAge, breachLevel, startedMessage, copyIncidentLink, rcaDue, shortAge } from '../format';
 
 const NEXT = { OPEN: ['INVESTIGATING'], INVESTIGATING: ['RESOLVED'], RESOLVED: ['CLOSED'], CLOSED: [] };
-const TRANSITION_LABEL = { INVESTIGATING: 'Start Investigating', RESOLVED: 'Mark Resolved', CLOSED: 'Close Incident' };
-const ACTIVE = ['OPEN', 'INVESTIGATING'];  // while active the signals lead; afterwards the RCA does
+const TRANSITION_LABEL = { INVESTIGATING: 'Start investigating', RESOLVED: 'Mark resolved', CLOSED: 'Close incident…' };
+const ACTIVE = ['OPEN', 'INVESTIGATING'];  // while active the Signals tab opens first; afterwards the RCA tab does
 const FINISHED = ['RESOLVED', 'CLOSED'];
 const SIGNALS_SHOWN = 5;
 const LIVE_MS = 15 * 60000;  // a signal group is "live" (its rate still means something) while its last signal is this recent
@@ -83,11 +84,13 @@ function RcaLine({ incident }) {
 
 // `onResolve(incident)` starts the owner's undoable resolve; `resolving` says one is pending for this incident.
 // `onOpened({ id, component, status, assignee_id })` reports the incident that loaded, for the list's note and the tab title.
-export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolving = false, onOpened }) {
+// `onClose` deselects the incident (the card's ✕; App also maps Escape to it).
+export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolving = false, onOpened, onClose }) {
   const { user } = useAuth();
   const write = canWrite(user);
-  // The user's own toggle for one incident; any other incident starts at the default for its status.
-  const [signalsView, setSignalsView] = useState({ id: null, open: false, all: false });
+  // The user's own tab choice and "Show all" for one incident; any other incident starts at the defaults for its status.
+  const [tabView, setTabView] = useState({ id: null, key: null });
+  const [allSignalsFor, setAllSignalsFor] = useState(null);
   const [transitioning, setTransit] = useState(null);
   const [assigningId, setAssigningId] = useState(null);  // the incident whose assignment request is in flight
   const [confirmId, setConfirmId] = useState(null);  // the incident whose Close is awaiting confirmation
@@ -179,9 +182,8 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
   const signalList = signals.data ?? [];
   const active = ACTIVE.includes(incident.status);
   const claimFirst = write && incident.status === 'INVESTIGATING' && !incident.assignee_id;
-  const view = signalsView.id === id ? signalsView : null;
-  const signalsOpen = view ? view.open : active;
-  const showAll = view?.all ?? false;
+  const tabKey = tabView.id === id ? tabView.key : active ? 'signals' : 'rca';
+  const showAll = allSignalsFor === id;
   const newestFirst = [...signalList].reverse();  // the API sends the latest signals oldest first
   const latest = newestFirst[0];
   const groups = groupSignals(newestFirst);
@@ -190,38 +192,27 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
   const assignable = (users.data ?? []).filter(u => u.role !== 'viewer');
 
   const signalsSection = (
-    <div className="signals" key="signals">
-      <h2>
-        <button type="button" className="btn-bare signals-toggle" aria-expanded={signalsOpen}
-          onClick={() => setSignalsView({ id, open: !signalsOpen, all: showAll })}>
-          <span className="signals-title">Signals ({(incident.signal_count ?? signalList.length).toLocaleString()})</span>
-          <span className="signals-caret"><Icon name="chevron-down" size={14} /></span>
-        </button>
-      </h2>
-      {signalsOpen && (
-        <div className="signal-list">
-          {(showAll ? groups : groups.slice(0, SIGNALS_SHOWN)).map(g => (
-            <div key={g.key} className="signal">
-              <span className="signal-dot" data-level={g.severity === 'CRITICAL' ? 'p0' : undefined} aria-hidden="true" />
-              <div className="signal-body">
-                <div className="signal-top">
-                  <span className="signal-msg" dir="auto">{g.message}</span>
-                  <span className="signal-count">×{g.count.toLocaleString()}</span>
-                </div>
-                <SignalMeta g={g} />
-              </div>
+    <div className="signal-list">
+      {(showAll ? groups : groups.slice(0, SIGNALS_SHOWN)).map(g => (
+        <div key={g.key} className="signal">
+          <span className="signal-dot" data-level={g.severity === 'CRITICAL' ? 'p0' : undefined} aria-hidden="true" />
+          <div className="signal-body">
+            <div className="signal-top">
+              <span className="signal-msg" dir="auto">{g.message}</span>
+              <span className="signal-count">×{g.count.toLocaleString()}</span>
             </div>
-          ))}
-          {signalList.length === 0 && <span className="muted">No signals yet.</span>}
-          {!showAll && groups.length > SIGNALS_SHOWN && (
-            <button type="button" className="btn-link" onClick={() => setSignalsView({ id, open: true, all: true })}>
-              Show all {groups.length} groups
-            </button>
-          )}
-          {incident.signal_count > signalList.length && signalList.length > 0 && (
-            <span className="muted-sm">showing the latest {signalList.length}</span>
-          )}
+            <SignalMeta g={g} />
+          </div>
         </div>
+      ))}
+      {signalList.length === 0 && <span className="muted">No signals yet.</span>}
+      {!showAll && groups.length > SIGNALS_SHOWN && (
+        <button type="button" className="btn-link" onClick={() => setAllSignalsFor(id)}>
+          Show all {groups.length} groups
+        </button>
+      )}
+      {incident.signal_count > signalList.length && signalList.length > 0 && (
+        <span className="muted-sm">showing the latest {signalList.length}</span>
       )}
     </div>
   );
@@ -238,12 +229,14 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
 
   const timelineSection = <CommentsSection key={`timeline:${id}`} wiId={id} refreshTick={refreshTick} />;
 
-  // The DOM order is the visual order, so keyboard order matches what is on screen.
-  const sections = active ? [signalsSection, timelineSection, rcaSection] : [rcaSection, timelineSection, signalsSection];
-
   return (
     <div className="detail" key={incident.id}>
       <div className="panel detail-card">
+        {onClose && (
+          <button type="button" className="deselect-btn" aria-label="Deselect incident" title="Deselect (Esc)" onClick={onClose}>
+            <Icon name="x" size={16} />
+          </button>
+        )}
         {completion && (
           <p className="completion" title={mttr ? 'Time from the first signal to the RCA' : undefined}>
             <Icon name="check" size={16} />
@@ -323,7 +316,7 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
             {transitions.length > 0 && (confirming ? (
               // An inline confirm, not a modal: Close is final, but nothing here needs protected focus.
               // eslint-disable-next-line jsx-a11y/no-static-element-interactions
-              <div className="close-confirm" onKeyDown={e => { if (e.key === 'Escape') setConfirmId(null); }}>
+              <div className="close-confirm" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setConfirmId(null); } }}>
                 <p>{confirmText}</p>
                 <div className="close-confirm-actions">
                   <button type="button" ref={cancelRef} className="btn btn-secondary" onClick={() => setConfirmId(null)}>Cancel</button>
@@ -360,7 +353,20 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
         )}
       </div>
 
-      {sections}
+      {/* Signals, Activity and RCA as tabs instead of one long stack; the open tab follows the state. Activity and RCA
+          stay mounted while hidden, so an unsent comment or RCA draft survives a tab switch. */}
+      <Tabs className="detail-tabs" selectedKey={tabKey} onSelectionChange={key => setTabView({ id, key })}>
+        <Tabs.ListContainer>
+          <Tabs.List aria-label="Incident sections">
+            <Tabs.Tab id="signals">Signals <span className="tab-count">{(incident.signal_count ?? signalList.length).toLocaleString()}</span><Tabs.Indicator /></Tabs.Tab>
+            <Tabs.Tab id="activity">Activity<Tabs.Indicator /></Tabs.Tab>
+            <Tabs.Tab id="rca">RCA<Tabs.Indicator /></Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
+        <Tabs.Panel id="signals" className="detail-panel">{signalsSection}</Tabs.Panel>
+        <Tabs.Panel id="activity" className="detail-panel" shouldForceMount><div hidden={tabKey !== 'activity'}>{timelineSection}</div></Tabs.Panel>
+        <Tabs.Panel id="rca" className="detail-panel" shouldForceMount><div hidden={tabKey !== 'rca'}>{rcaSection}</div></Tabs.Panel>
+      </Tabs>
     </div>
   );
 }

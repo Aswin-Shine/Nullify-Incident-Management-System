@@ -114,3 +114,4 @@ export const changePassword = (current_password, new_password) =>
 export const listAccounts = () => api.get('/api/auth/accounts').then(r => r.data);
 export const createUser = (data) => api.post('/api/auth/users', data).then(r => r.data);
 export const updateUser = (id, data) => api.patch(`/api/auth/users/${id}`, data).then(r => r.data);
+export const deleteUser = (id) => api.delete(`/api/auth/users/${id}`);

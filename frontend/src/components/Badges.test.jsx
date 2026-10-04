@@ -1,11 +1,11 @@
 import { render } from '@testing-library/react'
 import { StatusBadge, PriorityBadge } from './Badges'
 
-test.each(['OPEN', 'INVESTIGATING', 'CLOSED'])('%s carries its status and a drawn shape, no colour class', (status) => {
+test.each([['OPEN', 'Open'], ['INVESTIGATING', 'Investigating'], ['CLOSED', 'Closed']])('%s carries its status and a drawn shape, no colour class', (status, word) => {
   const { container } = render(<StatusBadge status={status} />)
   const badge = container.querySelector('.status')
   expect(badge.dataset.status).toBe(status)
-  expect(badge.textContent).toBe(status)
+  expect(badge.textContent).toBe(word)
   expect(badge.querySelector('.status-shape')).not.toBeNull()
 })
 
@@ -24,7 +24,7 @@ test('a muted priority chip is marked so it can render neutral', () => {
   expect(loud.dataset.muted).toBeUndefined()
 })
 
-test.each(['OPEN', 'INVESTIGATING', 'RESOLVED', 'CLOSED'])('%s keeps its word in its own span, so a narrow row can show only the shape', (status) => {
+test.each([['OPEN', 'Open'], ['INVESTIGATING', 'Investigating'], ['RESOLVED', 'Resolved'], ['CLOSED', 'Closed']])('%s keeps its word, in sentence case, in its own span, so a narrow row can show only the shape', (status, word) => {
   const { container } = render(<StatusBadge status={status} />)
-  expect(container.querySelector('.status .status-word').textContent).toBe(status)
+  expect(container.querySelector('.status .status-word').textContent).toBe(word)
 })

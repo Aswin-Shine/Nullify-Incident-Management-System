@@ -44,7 +44,7 @@ export function SignalInjector({ onSent }) {
               </select>
             )}
           </Field>
-          <Field label="Signal Type">
+          <Field label="Signal type">
             {id => (
               <select id={id} value={data.type} onChange={e => setData({ ...data, type: e.target.value })}>
                 {SIGNAL_TYPES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -58,7 +58,7 @@ export function SignalInjector({ onSent }) {
         </Field>
 
         <div role="group" aria-labelledby="batch-count-label">
-          <span className="field-label" id="batch-count-label">Batch Count</span>
+          <span className="field-label" id="batch-count-label">Batch count</span>
           <div className="stepper">
             <button type="button" className="step-btn" aria-label="Decrease count" onClick={() => setData({ ...data, count: Math.max(1, data.count - 1) })}>−</button>
             <span className="step-value" aria-live="polite">{data.count}</span>
@@ -67,7 +67,7 @@ export function SignalInjector({ onSent }) {
         </div>
 
         <button type="submit" disabled={loading} className="btn btn-secondary inject-submit">
-          {loading ? <span className="spinner" /> : `Inject ${data.count > 1 ? data.count + ' Signals' : 'Signal'}`}
+          {loading ? <span className="spinner" /> : `Inject ${data.count > 1 ? data.count + ' signals' : 'signal'}`}
         </button>
 
         {status && <div className="inject-status" data-status={status.type}>{status.text}</div>}

@@ -2,10 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/nullify-mark.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Nullify</title>
+    <!-- React Aria injects a <style> with this id unless one exists; the CSP (style-src 'self') would block it,
+         so its one rule ships in index.css and this placeholder stops the injection. -->
+    <meta id="react-aria-pressable-style" name="react-aria-pressable-style" content="in index.css" />
   </head>
   <body>
     <div id="root"></div>

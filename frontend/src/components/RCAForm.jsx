@@ -94,7 +94,7 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false, defaultOpe
   return (
     <div className="panel rca">
       <div className="rca-head">
-        <h2>Root Cause Analysis</h2>
+        <h2>Root cause analysis</h2>
         {rca && (
           <div className="rca-actions">
             <button type="button" className="pill" onClick={() => downloadMarkdown(workItem, rca)}><Icon name="download" size={12} />Export Markdown</button>
@@ -104,13 +104,13 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false, defaultOpe
 
       {rca ? (
         <div className="rca-body">
-          <ReadVal label="Impact Start" value={fmtStamp(rca.incident_start)} />
-          <ReadVal label="Impact End" value={fmtStamp(rca.incident_end)} />
+          <ReadVal label="Impact start" value={fmtStamp(rca.incident_start)} />
+          <ReadVal label="Impact end" value={fmtStamp(rca.incident_end)} />
           {/* after closing nobody can act on it, so only RESOLVED shows it */}
           {workItem.status !== 'CLOSED' && windowWarnings(rca, workItem.start_time).map(w => <p key={w} className="muted-sm rca-warn">{w}</p>)}
           <ReadVal label="Root Cause" value={rca.root_cause_category} />
-          <ReadVal label="Fix Applied" value={rca.fix_applied} />
-          <ReadVal label="Prevention Steps" value={rca.prevention_steps} />
+          <ReadVal label="Fix applied" value={rca.fix_applied} />
+          <ReadVal label="Prevention steps" value={rca.prevention_steps} />
         </div>
       ) : readOnly ? (
         <p className="muted">No RCA has been submitted yet.</p>
@@ -124,17 +124,17 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false, defaultOpe
             {workItem.status === 'INVESTIGATING' ? 'Needed to close the incident once it is resolved.' : 'Submit the RCA to close this incident.'}
           </p>
           <div className="rca-times">
-            <Field label="Impact Start">
+            <Field label="Impact start">
               {id => <input id={id} type="datetime-local" required value={formData.incident_start} onChange={set('incident_start')} />}
             </Field>
-            <Field label="Impact End">
+            <Field label="Impact end">
               {id => <input id={id} type="datetime-local" required value={formData.incident_end} onChange={set('incident_end')} />}
             </Field>
           </div>
           <p className="muted-sm rca-hint">Pre-filled from the first and last signal. Adjust if needed.</p>
           {beforeFirstSignal && <p className="muted-sm rca-warn">Starts before the first signal ({fmtStamp(workItem.start_time)}).</p>}
           {endsBeforeFirstSignal && <p className="muted-sm rca-warn">Ends before the first signal ({fmtStamp(workItem.start_time)}).</p>}
-          <Field label="Root Cause Category">
+          <Field label="Root cause category">
             {id => (
               <select id={id} required value={formData.root_cause_category} onChange={set('root_cause_category')}>
                 <option value="" disabled>Choose a category</option>
@@ -142,10 +142,10 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false, defaultOpe
               </select>
             )}
           </Field>
-          <Field label="Fix Applied">
+          <Field label="Fix applied">
             {id => <textarea id={id} required maxLength={MAX_TEXT} className="tall" placeholder="Describe what fix was applied…" value={formData.fix_applied} onChange={set('fix_applied')} />}
           </Field>
-          <Field label="Prevention Steps">
+          <Field label="Prevention steps">
             {id => <textarea id={id} required maxLength={MAX_TEXT} className="tall" placeholder="How will this be prevented…" value={formData.prevention_steps} onChange={set('prevention_steps')} />}
           </Field>
           {error && <ErrorNote>{error}</ErrorNote>}

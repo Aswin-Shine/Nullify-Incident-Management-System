@@ -19,6 +19,21 @@ function Host(props) {
 
 beforeEach(() => { vi.resetAllMocks() })
 
+// Priority and "Assigned to me" live in the Filters menu; the sort key and order in the Sort menu.
+const openMenu = async (name) => {
+  await userEvent.click(await screen.findByRole('button', { name }))
+  return screen.findByRole('menu')
+}
+const pickFilter = async (item, role = 'menuitemradio') => {
+  await openMenu(/^Filters/)
+  await userEvent.click(screen.getByRole(role, { name: item }))
+  if (role === 'menuitemcheckbox') await userEvent.keyboard('{Escape}')  // a checkbox item keeps the menu open
+}
+const sortBy = async (item) => {
+  await openMenu(/^Sort:/)
+  await userEvent.click(screen.getByRole('menuitemradio', { name: item }))
+}
+
 test('a row shows the component name (F-03)', async () => {
   api.fetchWorkItems.mockResolvedValue(page([workItem()]))
   render(<Host onSelect={() => {}} />)
@@ -104,20 +119,27 @@ test('typing in search refetches with q only after the 300 ms debounce', async (
   } finally { vi.useRealTimers() }
 })
 
-test('the priority select and "Assigned to me" toggle pass priority and assignee=me', async () => {
+test('the Filters menu passes priority and assignee=me, and its button names what is active', async () => {
   api.fetchWorkItems.mockResolvedValue(page([]))
   render(<Host onSelect={() => {}} />)
-  await userEvent.selectOptions(await screen.findByRole('combobox', { name: 'Priority' }), 'P0')
+  expect(await screen.findByRole('button', { name: 'Filters' })).toBeTruthy()
+  await pickFilter('P0')
   expect(api.fetchWorkItems).toHaveBeenLastCalledWith(expect.objectContaining({ priority: 'P0' }))
+  expect(screen.getByRole('button', { name: 'Filters: P0' })).toBeTruthy()
 
-  const mine = screen.getByRole('button', { name: 'Assigned to me' })
-  expect(mine.getAttribute('aria-pressed')).toBe('false')
+  await openMenu(/^Filters/)
+  const mine = screen.getByRole('menuitemcheckbox', { name: 'Assigned to me' })
+  expect(mine.getAttribute('aria-checked')).toBe('false')
   await userEvent.click(mine)
-  expect(mine.getAttribute('aria-pressed')).toBe('true')
+  await userEvent.keyboard('{Escape}')  // a checkbox item keeps the menu open
   expect(api.fetchWorkItems).toHaveBeenLastCalledWith(expect.objectContaining({ priority: 'P0', assignee: 'me' }))
+  expect(screen.getByRole('button', { name: 'Filters: P0, assigned to me' })).toBeTruthy()
 
-  await userEvent.click(mine)
+  await pickFilter('Assigned to me', 'menuitemcheckbox')
   expect(api.fetchWorkItems).toHaveBeenLastCalledWith(expect.objectContaining({ assignee: undefined }))
+  await pickFilter('Any priority')
+  expect(api.fetchWorkItems).toHaveBeenLastCalledWith(expect.objectContaining({ priority: undefined }))
+  expect(screen.getByRole('button', { name: 'Filters' })).toBeTruthy()
 })
 
 test('rows show the assignee, or Unassigned', async () => {
@@ -137,29 +159,28 @@ describe('sorting', () => {
   const three = (next = null) => page([
     workItem({ id: 'b', component: 'COMP_B' }), workItem({ id: 'c', component: 'COMP_C' }), workItem({ id: 'a', component: 'COMP_A' }),
   ], next)
-  const sortBtn = (name) => screen.getByRole('button', { name: `Sort by ${name}` })
-
-  test('there is one sort button per column and Priority starts pressed', async () => {
+  test('the Sort menu offers every key with Priority checked, and there are no column headers', async () => {
     api.fetchWorkItems.mockResolvedValue(three())
     render(<Host onSelect={() => {}} />)
     await screen.findByText('COMP_A')
-    for (const name of ['Priority', 'Component', 'Status', 'SLA', 'Assignee', 'Age']) expect(sortBtn(name)).toBeTruthy()
-    expect(sortBtn('Priority').getAttribute('aria-pressed')).toBe('true')
-    expect(sortBtn('Component').getAttribute('aria-pressed')).toBe('false')
-    expect(screen.getByRole('group', { name: 'Sort incidents' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Sort: Priority, ascending' })).toBeTruthy()
+    await openMenu(/^Sort:/)
+    for (const name of ['Priority', 'SLA', 'Age', 'Component', 'Status', 'Assignee']) expect(screen.getByRole('menuitemradio', { name })).toBeTruthy()
+    expect(screen.getByRole('menuitemradio', { name: 'Priority' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.queryByRole('group', { name: 'Sort incidents' })).toBeNull()
   })
 
-  test('clicking Component orders the rows A-Z, a second click Z-A', async () => {
+  test('sorting by Component orders the rows A-Z, then Descending Z-A', async () => {
     api.fetchWorkItems.mockResolvedValue(three())
     render(<Host onSelect={() => {}} />)
     await screen.findByText('COMP_A')
     expect(order()).toEqual(['b', 'c', 'a'])
-    await userEvent.click(sortBtn('Component'))
+    await sortBy('Component')
     expect(order()).toEqual(['a', 'b', 'c'])
-    expect(sortBtn('Component').getAttribute('aria-pressed')).toBe('true')
-    expect(sortBtn('Priority').getAttribute('aria-pressed')).toBe('false')
-    await userEvent.click(sortBtn('Component'))
+    expect(screen.getByRole('button', { name: 'Sort: Component, ascending' })).toBeTruthy()
+    await sortBy('Descending')
     expect(order()).toEqual(['c', 'b', 'a'])
+    expect(screen.getByRole('button', { name: 'Sort: Component, descending' })).toBeTruthy()
   })
 
   test('j follows the sorted order: from no selection it picks the alphabetically first row', async () => {
@@ -167,7 +188,7 @@ describe('sorting', () => {
     const onSelect = vi.fn()
     render(<Host onSelect={onSelect} />)
     await screen.findByText('COMP_A')
-    await userEvent.click(sortBtn('Component'))
+    await sortBy('Component')
     fireEvent.keyDown(document.body, { key: 'j' })
     expect(onSelect).toHaveBeenLastCalledWith('a')
   })
@@ -177,7 +198,7 @@ describe('sorting', () => {
     render(<Host onSelect={() => {}} />)
     await screen.findByText('COMP_A')
     expect(screen.getByText('Sorted within the 2 loaded')).toBeTruthy()  // the default sort is client-side too
-    await userEvent.click(sortBtn('Component'))
+    await sortBy('Component')
     expect(screen.getByText('Sorted within the 2 loaded')).toBeTruthy()
   })
 
@@ -186,7 +207,7 @@ describe('sorting', () => {
     render(<Host onSelect={() => {}} />)
     await screen.findByText('COMP_A')
     expect(screen.queryByText(/Sorted within/)).toBeNull()
-    await userEvent.click(sortBtn('Component'))
+    await sortBy('Component')
     expect(screen.queryByText(/Sorted within/)).toBeNull()
   })
 })
@@ -331,7 +352,7 @@ describe('UX step 2: quieter list', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'All' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Show 1 critical incident, 1 unowned' }))
     expect(api.fetchWorkItems).toHaveBeenLastCalledWith(expect.objectContaining({ priority: 'P0', status: 'ACTIVE' }))
-    expect(screen.getByRole('combobox', { name: 'Priority' }).value).toBe('P0')
+    expect(screen.getByRole('button', { name: 'Filters: P0' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('true')
   })
 
@@ -363,7 +384,8 @@ describe('second critique: list', () => {
     const onLoaded = vi.fn()
     render(<Host onSelect={() => {}} onLoaded={onLoaded} />)
     await screen.findByText('OVERDUE')
-    expect(onLoaded).toHaveBeenLastCalledWith(['overdue', 'fresh'])
+    // onLoaded fires from an effect, which can land just after the rows appear: wait for it rather than race it
+    await waitFor(() => expect(onLoaded).toHaveBeenLastCalledWith(['overdue', 'fresh']))
     expect([...document.querySelectorAll('[data-incident-id]')].map(el => el.dataset.incidentId)).toEqual(['overdue', 'fresh'])
   })
 
@@ -536,7 +558,7 @@ describe('fifth critique: phone rows keep the owner', () => {
     await screen.findByText('OWNED')
     const row = (name) => [...container.querySelectorAll('.incident-row')].find(r => r.textContent.includes(name))
     expect(row('OWNED').querySelector('[data-col="assignee"]').textContent).toContain('alice')
-    expect(row('OWNED').querySelector('[data-col="status"] .status-word').textContent).toBe('INVESTIGATING')
+    expect(row('OWNED').querySelector('[data-col="status"] .status-word').textContent).toBe('Investigating')
     expect(row('NOBODY').querySelector('[data-col="assignee"]').textContent).toBe('Unassigned')
     expect(row('NOBODY').querySelector('[data-col="assignee"] .unowned-ring')).not.toBeNull()
     expect(row('LOW').querySelector('[data-col="assignee"] .unowned-ring')).toBeNull()
@@ -614,5 +636,23 @@ describe('RCA due marker on resolved rows', () => {
 
   test('no marker on a closed incident', async () => {
     expect((await slaCell({ status: 'CLOSED', resolved_at: ago(72 * HOUR) })).textContent).toBe('')
+  })
+})
+
+describe('redesign: two-line rows', () => {
+  test('line 1 holds the priority, the component and the SLA; line 2 the status, the owner and the age', async () => {
+    api.fetchWorkItems.mockResolvedValue(page([workItem({
+      id: 'a', component: 'RDBMS_PRIMARY', priority: 'P1', status: 'INVESTIGATING', assignee_id: 'u2', assignee_username: 'alice',
+      sla_deadline: new Date(Date.now() - 2.5 * 3600_000).toISOString(),  // off the hour boundary: the shared clock can lag a moment
+    })]))
+    render(<Host onSelect={() => {}} />)
+    const row = await screen.findByRole('button', { name: /RDBMS_PRIMARY/ })
+    const [line1, line2] = row.querySelectorAll('.row-line')
+    expect(line1.querySelector('[data-col="priority"]').textContent).toBe('P1')
+    expect(line1.querySelector('[data-col="component"]').textContent).toBe('RDBMS_PRIMARY')
+    expect(line1.querySelector('[data-col="sla"]').textContent).toContain('+2h')
+    expect(line2.querySelector('[data-col="status"]').textContent).toBe('Investigating')
+    expect(line2.querySelector('[data-col="assignee"]').textContent).toContain('alice')
+    expect(line2.querySelector('[data-col="age"]').textContent).toBe('1h')
   })
 })

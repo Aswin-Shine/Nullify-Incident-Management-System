@@ -101,7 +101,7 @@ export function signalRate(count, firstIso, lastIso) {
   return perHour >= 1 ? `≈ ${perHour}/h` : null;
 }
 
-// The toast after Start Investigating: it claims an unowned incident for you, so say so when the response shows it.
+// The toast after Start investigating: it claims an unowned incident for you, so say so when the response shows it.
 export const startedMessage = (before, updated, userId) =>
   !before?.assignee_id && updated.assignee_id === userId ? 'Investigating · assigned to you' : `Moved to ${updated.status}`;
 

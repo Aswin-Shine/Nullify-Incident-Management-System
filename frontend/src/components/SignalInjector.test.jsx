@@ -11,7 +11,7 @@ beforeEach(() => { vi.resetAllMocks() })
 test('inputs are labelled and the stepper buttons are named (F-08, F-09)', () => {
   render(<SignalInjector />)
   expect(screen.getByLabelText('Component')).toBeTruthy()
-  expect(screen.getByLabelText('Signal Type')).toBeTruthy()
+  expect(screen.getByLabelText('Signal type')).toBeTruthy()
   expect(screen.getByLabelText(/Message/)).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Increase count' })).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Decrease count' })).toBeTruthy()
@@ -29,14 +29,14 @@ test('the batch count sends that many signals', async () => {
   render(<SignalInjector />)
   await userEvent.click(screen.getByRole('button', { name: 'Increase count' }))
   await userEvent.click(screen.getByRole('button', { name: 'Increase count' }))
-  await userEvent.click(screen.getByRole('button', { name: /Inject 3 Signals/ }))
+  await userEvent.click(screen.getByRole('button', { name: /Inject 3 signals/ }))
   expect(api.ingestSignal).toHaveBeenCalledTimes(3)
 })
 
 test('an API error is shown', async () => {
   api.ingestSignal.mockRejectedValue(httpError(429, 'Rate limited'))
   render(<SignalInjector />)
-  await userEvent.click(screen.getByRole('button', { name: /Inject Signal/ }))
+  await userEvent.click(screen.getByRole('button', { name: /Inject signal/ }))
   expect(await screen.findByText(/Rate limited/)).toBeTruthy()
 })
 
@@ -48,7 +48,7 @@ test('the default component is the DEMO_APP sandbox, not a production-looking on
 
 test('the submit button is secondary', () => {
   render(<SignalInjector />)
-  const submit = screen.getByRole('button', { name: /Inject Signal/ })
+  const submit = screen.getByRole('button', { name: /Inject signal/ })
   expect(submit.classList.contains('btn-secondary')).toBe(true)
   expect(submit.classList.contains('btn-primary')).toBe(false)
 })
@@ -57,7 +57,7 @@ test('the message placeholder is exactly what is sent when the field is left emp
   api.ingestSignal.mockResolvedValue({})
   render(<SignalInjector />)
   const placeholder = screen.getByLabelText(/Message/).placeholder
-  await userEvent.click(screen.getByRole('button', { name: /Inject Signal/ }))
+  await userEvent.click(screen.getByRole('button', { name: /Inject signal/ }))
   expect(api.ingestSignal).toHaveBeenCalledWith(expect.objectContaining({ message: placeholder }))
 })
 

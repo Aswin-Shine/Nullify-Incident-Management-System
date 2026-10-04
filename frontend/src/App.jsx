@@ -5,6 +5,7 @@ import { LoginPage } from './components/LoginPage';
 import { IncidentList } from './components/IncidentList';
 import { IncidentDetail } from './components/IncidentDetail';
 import { HealthBar } from './components/HealthBar';
+import { AccountMenu } from './components/AccountMenu';
 import { SignalInjector } from './components/SignalInjector';
 import { AnalyticsPanel } from './components/AnalyticsPanel';
 import { CommandPalette } from './components/CommandPalette';
@@ -21,11 +22,10 @@ import { updateStatus, assignWorkItem, errorMessage } from './api/client';
 import { startedMessage, copyIncidentLink } from './format';
 import { Icon } from './components/Icon';
 import { useSplitWidth } from './hooks/useSplitWidth';
-import { getThemePref, setThemePref, nextTheme } from './theme';
+import { getThemePref, setThemePref } from './theme';
 import { DEFAULT_VIEW } from './sort';
 
 const TAB_ICON = { incidents: 'alert-triangle', analytics: 'bar-chart', inject: 'zap', account: 'user', users: 'users' };
-const THEME_ICON = { system: 'monitor', light: 'sun', dark: 'moon' };
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const RESOLVE_UNDO_MS = 5000;
 const PHONE_BELOW = 900;  // same breakpoint as the CSS: under it the list and the detail take turns
@@ -84,9 +84,9 @@ function Dashboard() {
     if (!selectedId && ids.length && window.innerWidth >= PHONE_BELOW) select(ids[0], { replace: true });
   }, [selectedId, select]);
 
-  // Back to the list (phone view): the row that was open gets the focus again once it is visible.
+  // Back to the list (phone view), the card's deselect button, or Escape: the row that was open gets the focus again.
   const backTo = useRef(null);
-  const goBack = () => { backTo.current = selectedId; select(null); };
+  const goBack = useCallback(() => { backTo.current = selectedId; select(null); }, [selectedId, select]);
   useEffect(() => {
     if (selectedId != null || !backTo.current) return;
     document.querySelector(`[data-incident-id="${backTo.current}"]`)?.focus();
@@ -173,6 +173,18 @@ function Dashboard() {
     setLiveEvents(ev => [label, ...ev].slice(0, 5));
   }, refresh, setFeed);  // events are lost while the socket is down, so refetch once it is back
 
+  // Escape closes the open incident (the list stays), unless focus is in a field or an overlay (palette, menu,
+  // popover) owns the key; inline confirms stop their own Escape before it gets here.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || activeTab !== 'incidents' || selectedId == null) return;
+      if (e.target.closest?.('input, textarea, select, [contenteditable], [role="dialog"], [role="menu"], [role="listbox"]')) return;
+      goBack();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [activeTab, selectedId, goBack]);
+
   // Ctrl/Cmd+K toggles the command palette from anywhere.
   useEffect(() => {
     const onKey = (e) => {
@@ -184,9 +196,9 @@ function Dashboard() {
 
   const tabs = tabsFor(user);
   const devTools = tabs.includes('inject');  // SRE and admin only, kept apart from the pages people work in
+  const pages = tabs.filter(tab => tab !== 'inject' && tab !== 'account');  // Account and Inject live in the account menu
 
   const chooseTheme = (pref) => { setThemePref(pref); setTheme(pref); };
-  const cycleTheme = () => chooseTheme(nextTheme(theme));
 
   return (
     <div className="app">
@@ -197,33 +209,17 @@ function Dashboard() {
         </div>
 
         <div className="nav-items">
-          {tabs.filter(tab => tab !== 'inject').map(tab => <NavItem key={tab} tab={tab} activeTab={activeTab} onOpen={setActiveTab} />)}
+          {pages.map(tab => <NavItem key={tab} tab={tab} activeTab={activeTab} onOpen={setActiveTab} />)}
         </div>
 
         <div className="sidebar-foot">
-          {devTools && (
-            <div className="nav-group" role="group" aria-labelledby="dev-tools-label">
-              <span className="micro nav-group-label" id="dev-tools-label">Dev tools</span>
-              <NavItem tab="inject" activeTab={activeTab} onOpen={setActiveTab} />
-            </div>
-          )}
           <button type="button" className="nav-item" aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}>
             <Icon name="search" />
             <span className="nav-label">Search</span>
             <kbd className="kbd nav-kbd" aria-hidden="true">⌘K</kbd>
           </button>
-          <button type="button" className="nav-item" aria-label={`Theme: ${cap(theme)}`} onClick={cycleTheme}>
-            <Icon name={THEME_ICON[theme]} />
-            <span className="nav-label">Theme: {cap(theme)}</span>
-          </button>
-          <div className="user-block">
-            <div className="avatar">{(user?.username || '?')[0].toUpperCase()}</div>
-            <div className="user-meta">
-              <span className="user-name">{user?.username}</span>
-              <span className="micro">{user?.role}</span>
-            </div>
-            <button type="button" className="icon-btn" aria-label="Log out" onClick={logout}><Icon name="log-out" /></button>
-          </div>
+          <HealthBar feed={feed} liveEvents={liveEvents} newP0={unopenedP0.length} onOpenNewP0={() => select(unopenedP0[0])} />
+          <AccountMenu user={user} theme={theme} onTheme={chooseTheme} onOpen={setActiveTab} onLogout={logout} devTools={devTools} />
         </div>
       </nav>
 
@@ -235,8 +231,6 @@ function Dashboard() {
       )}
 
       <div className="content">
-        <HealthBar feed={feed} liveEvents={liveEvents} newP0={unopenedP0.length} onOpenNewP0={() => select(unopenedP0[0])} />
-
         <main className="main">
           {activeTab === 'incidents' && (
             <div className="split" data-selected={selectedId != null} style={{ '--list-w': `${split.width}px` }}>
@@ -255,7 +249,7 @@ function Dashboard() {
                   </button>
                 )}
                 <ErrorBoundary resetKey={selectedId}>
-                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} onOpened={setOpenInfo}
+                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} onOpened={setOpenInfo} onClose={goBack}
                     onResolve={resolve} resolving={!!resolver.pending[selectedId]} />
                 </ErrorBoundary>
               </div>

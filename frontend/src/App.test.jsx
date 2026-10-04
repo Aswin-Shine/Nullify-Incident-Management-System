@@ -10,13 +10,14 @@ const mockDetail = vi.hoisted(() => ({ status: 'OPEN' }))  // the state the mock
 vi.mock('./components/IncidentDetail', async () => {
   const { useEffect } = await import('react')
   return {
-    IncidentDetail: ({ id, onResolve, resolving, onOpened }) => {
+    IncidentDetail: ({ id, onResolve, resolving, onOpened, onClose }) => {
       // The real pane reports the incident it loaded; here every id loads as an unowned incident named COMP_<id>, OPEN unless a test sets mockDetail.status.
       useEffect(() => { if (id) onOpened?.({ id, component: `COMP_${id}`, status: mockDetail.status, assignee_id: null }) }, [id, onOpened])
       return (
         <>
           <div data-testid="detail">{String(id)}</div>
           <button type="button" onClick={() => onResolve({ id, component: 'RDBMS_X' })}>mock resolve</button>
+          {id && <button type="button" onClick={onClose}>mock deselect</button>}
           {resolving && <span>mock resolving</span>}
         </>
       )
@@ -53,32 +54,61 @@ beforeEach(() => {
 async function open(role) {
   api.refreshSession.mockResolvedValue({ user: { id: 'u1', username: 'me', role } })
   render(<App />)
-  await screen.findByRole('button', { name: 'Log out' })  // waits for the session restore, not a fixed delay
+  await screen.findByRole('button', { name: /^Account menu/ })  // waits for the session restore, not a fixed delay
 }
 
-test('tabs and logout are real buttons with names (F-08)', async () => {
+// Account, Theme, Inject (dev tools) and Log out live in the account menu.
+async function openMenu() {
+  await userEvent.click(screen.getByRole('button', { name: /^Account menu/ }))
+  return screen.findByRole('menu')
+}
+async function pickMenu(name) {
+  await openMenu()
+  await userEvent.click(screen.getByRole('menuitem', { name }))
+}
+// The status pill's popover holds the API state, the queue and the live events.
+async function openStatus() {
+  await userEvent.click(screen.getByRole('button', { name: /System status/ }))
+  return screen.findByRole('dialog', { name: 'System status' })
+}
+
+test('tabs are real buttons with names, and Log out is a named item in the account menu (F-08)', async () => {
   await open('sre')
-  for (const name of ['Incidents', 'Analytics', 'Inject', 'Log out']) {
+  for (const name of ['Incidents', 'Analytics', /^Account menu: me SRE/]) {
     expect(screen.getByRole('button', { name }).tagName).toBe('BUTTON')
   }
+  await openMenu()
+  expect(screen.getByRole('menuitem', { name: 'Log out' })).toBeTruthy()
 })
 
-test('a viewer gets no Inject tab', async () => {
+test('a viewer gets no Inject item', async () => {
   await open('viewer')
   expect(screen.getByRole('button', { name: 'Analytics' })).toBeTruthy()
-  expect(screen.queryByRole('button', { name: 'Inject' })).toBeNull()
+  await openMenu()
+  expect(screen.getByRole('menuitem', { name: 'Account' })).toBeTruthy()
+  expect(screen.queryByRole('menuitem', { name: 'Inject' })).toBeNull()
 })
 
-test('an admin sees the Account and Users tabs', async () => {
+test('an admin sees Users in the main nav and Account in the menu', async () => {
   await open('admin')
-  expect(screen.getByRole('button', { name: 'Account' })).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Users' })).toBeTruthy()
+  await openMenu()
+  expect(screen.getByRole('menuitem', { name: 'Account' })).toBeTruthy()
 })
 
 test.each(['sre', 'viewer'])('a %s sees Account but not Users', async (role) => {
   await open(role)
-  expect(screen.getByRole('button', { name: 'Account' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Users' })).toBeNull()
+  await openMenu()
+  expect(screen.getByRole('menuitem', { name: 'Account' })).toBeTruthy()
+})
+
+test('the main nav is only the pages people work in, and the top status strip is gone', async () => {
+  await open('sre')
+  const nav = screen.getByRole('navigation', { name: 'Main' })
+  const pages = [...nav.querySelectorAll('[aria-current], .nav-item')].filter(b => b.closest('.nav-items')).map(b => b.textContent)
+  expect(pages).toEqual(['Incidents', 'Analytics'])
+  expect(document.querySelector('.health-bar')).toBeNull()
 })
 
 // The latest onMessage handler App handed to the (mocked) WebSocket hook.
@@ -169,8 +199,9 @@ test('the live feed labels assignment and creation events readably', async () =>
   await open('sre')
   emit({ event: 'work_item_assigned', id: 'wi-1' })
   emit(created({ priority: 'P2', component: 'CACHE_7' }))
-  expect((await screen.findAllByText('assignment changed')).length).toBeGreaterThan(0)
-  expect(screen.getAllByText('new P2 CACHE_7').length).toBeGreaterThan(0)
+  const status = await openStatus()
+  expect(within(status).getByText('assignment changed')).toBeTruthy()
+  expect(within(status).getByText('new P2 CACHE_7')).toBeTruthy()
   expect(screen.queryByText('work_item_assigned')).toBeNull()
 })
 
@@ -179,15 +210,19 @@ test('the sidebar is a navigation landmark named Main', async () => {
   expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
 })
 
-test('the theme toggle cycles System to Light and sets data-theme on the page', async () => {
+test('the account menu sets the theme, marks the current one, and sets data-theme on the page', async () => {
   await open('sre')
-  await userEvent.click(screen.getByRole('button', { name: 'Theme: System' }))
-  expect(screen.getByRole('button', { name: 'Theme: Light' })).toBeTruthy()
+  await openMenu()
+  expect(screen.getByRole('menuitemradio', { name: 'System' }).getAttribute('aria-checked')).toBe('true')
+  await userEvent.click(screen.getByRole('menuitemradio', { name: 'Light' }))
   expect(document.documentElement.dataset.theme).toBe('light')
-  await userEvent.click(screen.getByRole('button', { name: 'Theme: Light' }))
+  await openMenu()
+  expect(screen.getByRole('menuitemradio', { name: 'Light' }).getAttribute('aria-checked')).toBe('true')
+  await userEvent.click(screen.getByRole('menuitemradio', { name: 'Dark' }))
   expect(document.documentElement.dataset.theme).toBe('dark')
-  await userEvent.click(screen.getByRole('button', { name: 'Theme: Dark' }))
-  expect(document.documentElement.dataset.theme).toBeUndefined()
+  await openMenu()
+  await userEvent.click(screen.getByRole('menuitemradio', { name: 'System' }))
+  expect(document.documentElement.dataset.theme).toBe('light')  // system resolves; jsdom has no matchMedia, so light
 })
 
 test('the split handle starts at 560 on a wide window', async () => {
@@ -381,19 +416,24 @@ test('once permission is decided the enable button is not shown', async () => {
   expect(screen.queryByRole('button', { name: 'Enable desktop alerts' })).toBeNull()
 })
 
+test('the status details read API OK when the API is fine', async () => {
+  await open('sre')
+  await waitFor(() => expect(api.fetchHealth).toHaveBeenCalled())
+  expect(await openStatus()).toHaveProperty('textContent', expect.stringContaining('API OK'))
+})
+
 test.each([
-  [{ status: 'ok' }, 'API OK'],
-  [{ status: 'degraded' }, 'API DEGRADED'],
-])('the strip reads %j as %s', async (health, label) => {
+  [{ status: 'degraded' }, 'API degraded'],
+])('the pill reads %j as %s', async (health, label) => {
   api.fetchHealth.mockResolvedValue(health)
   await open('sre')
   expect(await screen.findByText(label)).toBeTruthy()
 })
 
-test('an unreachable health endpoint reads API UNREACHABLE', async () => {
+test('an unreachable health endpoint reads API unreachable on the pill', async () => {
   api.fetchHealth.mockRejectedValue(new Error('down'))
   await open('sre')
-  expect(await screen.findByText('API UNREACHABLE')).toBeTruthy()
+  expect(await screen.findByText('API unreachable')).toBeTruthy()
 })
 
 describe('Resolve with undo', () => {
@@ -450,7 +490,8 @@ describe('Resolve with undo', () => {
   test('logging out inside the window cancels it', async () => {
     api.logout.mockResolvedValue({})
     await resolveNow()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Log out' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Account menu/ })) })
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Log out' })) })
     await wait(10_000)
     expect(api.updateStatus).not.toHaveBeenCalled()
   })
@@ -478,25 +519,11 @@ test('Back returns focus to the row that was open', async () => {
   expect(document.activeElement).toBe(row)
 })
 
-// ---- UX step 5: Inject is a dev tool ----
+// ---- UX step 5: Inject is a dev tool (now in the account menu) ----
 
-test('Inject lives under Dev tools, and the main group is Incidents, Analytics, Account', async () => {
+test('Inject opens from the account menu', async () => {
   await open('sre')
-  const dev = screen.getByRole('group', { name: 'Dev tools' })
-  expect(within(dev).getByRole('button', { name: 'Inject' })).toBeTruthy()
-  const main = [...document.querySelectorAll('.nav-items button')].map(b => b.textContent)
-  expect(main).toEqual(['Incidents', 'Analytics', 'Account'])
-})
-
-test('a viewer has no Dev tools group', async () => {
-  await open('viewer')
-  expect(screen.queryByRole('group', { name: 'Dev tools' })).toBeNull()
-})
-
-test('Inject still opens from the Dev tools group', async () => {
-  await open('sre')
-  await userEvent.click(screen.getByRole('button', { name: 'Inject' }))
-  expect(screen.getByRole('button', { name: 'Inject' }).getAttribute('aria-current')).toBe('page')
+  await pickMenu('Inject')
   expect(screen.getByRole('heading', { name: 'Signal injector' })).toBeTruthy()
 })
 
@@ -530,7 +557,8 @@ describe('second critique: App', () => {
 
   test.each([['Analytics', 'Analytics'], ['Account', 'Account'], ['Inject', 'Signal injector']])('the %s page has a level-1 title', async (tab, title) => {
     await open('sre')
-    await userEvent.click(screen.getByRole('button', { name: tab }))
+    if (tab === 'Analytics') await userEvent.click(screen.getByRole('button', { name: tab }))
+    else await pickMenu(tab)
     expect(await screen.findByRole('heading', { level: 1, name: title })).toBeTruthy()
   })
 })
@@ -643,23 +671,25 @@ describe('third critique: palette actions', () => {
 })
 
 describe('fourth critique: live feed status', () => {
-  const stripState = () => within(document.querySelector('.health-bar')).getByRole('status')
+  const stripState = () => within(document.querySelector('.status-area')).getByRole('status')
   const report = (status) => act(() => useWebSocket.mock.calls.at(-1)[2](status))
 
-  test('the strip says CONNECTING before the socket has authenticated, then LIVE after auth_ok', async () => {
+  test('the status pill says Connecting before the socket has authenticated, then Live after auth_ok', async () => {
     await open('sre')
-    expect(stripState().textContent).toBe('CONNECTING…')
+    expect(stripState().textContent).toBe('Connecting…')
     report('live')
-    expect(stripState().textContent).toBe('LIVE')
+    expect(stripState().textContent).toBe('Live')
   })
 
-  test('a dropped socket reads RECONNECTING until it is live again', async () => {
+  test('a dropped socket reads Reconnecting until it is live again, and the details warn events may be missed', async () => {
     await open('sre')
     report('live')
     report('reconnecting')
-    expect(stripState().textContent).toBe('RECONNECTING · events may be missed')
+    expect(stripState().textContent).toBe('Reconnecting…')
+    expect((await openStatus()).textContent).toContain('Reconnecting · events may be missed')
+    await userEvent.keyboard('{Escape}')  // an open popover hides the page behind it from the accessibility tree
     report('live')
-    expect(stripState().textContent).toBe('LIVE')
+    expect(stripState().textContent).toBe('Live')
   })
 })
 
@@ -676,24 +706,67 @@ describe('fourth critique: Analytics tiles navigate', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Show 3 open incidents' }))
     expect(screen.getByRole('button', { name: 'Incidents' }).getAttribute('aria-current')).toBe('page')
     expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('combobox', { name: 'Priority' }).value).toBe('')
+    expect(screen.getByRole('button', { name: 'Filters' })).toBeTruthy()  // no priority (or anything else) filtered
   })
 
   test('"Show N open P0 incidents" lands on ACTIVE with the P0 priority', async () => {
     await openAnalytics({ P0: 2, P1: 1, P2: 0, P3: 0 })
     await userEvent.click(await screen.findByRole('button', { name: 'Show 2 open P0 incidents' }))
     expect(screen.getByRole('button', { name: 'Active' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('combobox', { name: 'Priority' }).value).toBe('P0')
+    expect(screen.getByRole('button', { name: 'Filters: P0' })).toBeTruthy()
   })
 
   test('leftover search and Assigned to me do not hide what the tile counted', async () => {
     api.fetchSLA.mockResolvedValue({ total: 9, breached: 1, breach_rate_pct: 11, open_by_priority: { P0: 1, P1: 0, P2: 0, P3: 0 } })
     await open('sre')
     await userEvent.type(screen.getByRole('searchbox', { name: 'Search components' }), 'zzz')
-    await userEvent.click(screen.getByRole('button', { name: 'Assigned to me' }))
+    await userEvent.click(screen.getByRole('button', { name: /^Filters/ }))
+    await userEvent.click(await screen.findByRole('menuitemcheckbox', { name: 'Assigned to me' }))
+    await userEvent.keyboard('{Escape}')  // a checkbox item keeps the menu open
+    expect(screen.getByRole('button', { name: 'Filters: assigned to me' })).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Analytics' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Show 1 open incident' }))
     expect(screen.getByRole('searchbox', { name: 'Search components' }).value).toBe('')
-    expect(screen.getByRole('button', { name: 'Assigned to me' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('button', { name: 'Filters' })).toBeTruthy()
+  })
+})
+
+describe('deselecting the open incident', () => {
+  const p2Row = () => ({ items: [{ id: 'p2-1', component: 'CACHE_P2', priority: 'P2', status: 'OPEN', title: 't', created_at: new Date().toISOString() }], next_cursor: null })
+
+  test('Escape clears the open incident and puts focus back on its row', async () => {
+    window.history.replaceState(null, '', '/?incident=p2-1')
+    api.fetchWorkItems.mockResolvedValue(p2Row())
+    await open('sre')
+    const row = await screen.findByRole('button', { name: /CACHE_P2/ })
+    await userEvent.keyboard('{Escape}')
+    expect(screen.getByTestId('detail').textContent).toBe('null')
+    expect(window.location.search).toBe('')
+    expect(document.activeElement).toBe(row)
+  })
+
+  test('Escape while typing in a field leaves the incident open', async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await userEvent.click(screen.getByRole('searchbox', { name: 'Search components' }))
+    await userEvent.keyboard('{Escape}')
+    expect(screen.getByTestId('detail').textContent).toBe('abc')
+  })
+
+  test('Escape in the command palette closes the palette only', async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await userEvent.keyboard('{Control>}k{/Control}')
+    await screen.findByRole('dialog', { name: 'Command palette' })
+    await userEvent.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+    expect(screen.getByTestId('detail').textContent).toBe('abc')
+  })
+
+  test("the pane's deselect control clears the selection", async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await userEvent.click(screen.getByRole('button', { name: 'mock deselect' }))
+    expect(screen.getByTestId('detail').textContent).toBe('null')
   })
 })

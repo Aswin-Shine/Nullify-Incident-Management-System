@@ -60,3 +60,16 @@ test('the password field has no bullet placeholder', () => {
   setup()
   expect(screen.getByLabelText('Password').getAttribute('placeholder')).toBeNull()
 })
+
+test('clicking Sign in submits the form, and the button is disabled while signing in', async () => {
+  let finish
+  api.login.mockReturnValue(new Promise(r => { finish = r }))
+  setup()
+  await userEvent.type(screen.getByLabelText('Username'), 'alice')
+  await userEvent.type(screen.getByLabelText('Password'), 'secret-pass')
+  await userEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+  expect(api.login).toHaveBeenCalledWith({ username: 'alice', password: 'secret-pass' })
+  const pending = screen.getByRole('button', { name: 'Signing in…' })  // keeps a name while busy (was a bare spinner)
+  expect(pending.hasAttribute('disabled') || pending.getAttribute('aria-disabled') === 'true').toBe(true)
+  finish({ user: { username: 'alice' } })
+})

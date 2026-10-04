@@ -23,23 +23,26 @@ beforeEach(() => {
 })
 
 const settle = () => act(async () => { await new Promise(r => setTimeout(r, 20)) })
+// Signals, Activity (timeline and comments) and RCA are tabs; the default follows the state (active: Signals, finished: RCA).
+const tab = (name) => screen.findByRole('tab', { name: new RegExp(`^${name}`) })
+const openTab = async (name) => userEvent.click(await tab(name))
 
 test('the header shows the component name (F-03)', async () => {
   await renderAs('sre', <IncidentDetail id="wi-1" />)
   expect(await screen.findByRole('heading', { name: 'RDBMS_PRIMARY' })).toBeTruthy()
 })
 
-test('the signals toggle is a button that reveals message and relative time (F-04, F-08, F-25)', async () => {
-  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED' }))  // resolved incidents start with signals collapsed
+test('the Signals tab reveals message and relative time (F-04, F-08, F-25)', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED' }))  // resolved incidents open on the RCA tab
   api.fetchSignals.mockResolvedValue([
     { id: 's1', timestamp: new Date(Date.now() - 5 * 60_000).toISOString(), message: 'conn refused', severity: 'CRITICAL' },
   ])
-  await renderAs('sre', <IncidentDetail id="wi-1" />)
-  const toggle = await screen.findByRole('button', { name: /Signals/ })
-  expect(toggle.getAttribute('aria-expanded')).toBe('false')
-  await userEvent.click(toggle)
-  expect(toggle.getAttribute('aria-expanded')).toBe('true')
-  expect(screen.getAllByText('conn refused').length).toBeGreaterThan(0)
+  const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('false')
+  expect(container.querySelector('.signal-msg')).toBeNull()
+  await openTab('Signals')
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('true')
+  expect(container.querySelector('.signal-msg').textContent).toBe('conn refused')
   expect(screen.getByText(/minutes ago/)).toBeTruthy()
 })
 
@@ -47,7 +50,7 @@ test('a viewer sees the assignee but no mutation controls and no user list call 
   api.fetchWorkItem.mockResolvedValue(workItem({ assignee_id: 'u2', assignee_username: 'alice' }))
   await renderAs('viewer', <IncidentDetail id="wi-1" />)
   expect(await screen.findByText('alice')).toBeTruthy()
-  expect(screen.queryByRole('button', { name: /Start Investigating/ })).toBeNull()
+  expect(screen.queryByRole('button', { name: /Start investigating/ })).toBeNull()
   expect(screen.queryByRole('button', { name: 'Submit RCA' })).toBeNull()
   expect(screen.queryByRole('combobox')).toBeNull()
   expect(api.listUsers).not.toHaveBeenCalled()
@@ -56,7 +59,7 @@ test('a viewer sees the assignee but no mutation controls and no user list call 
 test('a rejected transition shows an error toast with the server detail, not an inline note (F-11)', async () => {
   api.updateStatus.mockRejectedValue(httpError(409, 'Lost race'))
   const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
+  await userEvent.click(await screen.findByRole('button', { name: /Start investigating/ }))
   const toast = (await screen.findByText(/Lost race/)).closest('.toast')
   expect(toast).not.toBeNull()
   expect(toast.dataset.kind).toBe('error')
@@ -66,7 +69,7 @@ test('a rejected transition shows an error toast with the server detail, not an 
 test('a successful status change shows a success toast', async () => {
   api.updateStatus.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
+  await userEvent.click(await screen.findByRole('button', { name: /Start investigating/ }))
   const toast = (await screen.findByText('Moved to INVESTIGATING')).closest('.toast')
   expect(toast.dataset.kind).toBe('success')
 })
@@ -95,8 +98,8 @@ test('a failed assignment shows an error toast', async () => {
 test('a successful transition renders the response without refetching (F-17)', async () => {
   api.updateStatus.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
-  expect(await screen.findByText('INVESTIGATING')).toBeTruthy()
+  await userEvent.click(await screen.findByRole('button', { name: /Start investigating/ }))
+  expect(await screen.findByText('Investigating')).toBeTruthy()
   expect(api.fetchWorkItem).toHaveBeenCalledTimes(1)
 })
 
@@ -121,7 +124,7 @@ test('a new refreshTick refetches the incident (F-28)', async () => {
 
 test('the RCA is fetched once per incident (F-30)', async () => {
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await screen.findByText('Root Cause Analysis')
+  await screen.findByText('Root cause analysis')
   await settle()
   expect(api.fetchRCA).toHaveBeenCalledTimes(1)
 })
@@ -166,14 +169,16 @@ test('switching incidents gives a fresh RCA form with that incident\'s own times
   const b = workItem({ id: 'wi-b', status: 'INVESTIGATING', component: 'CACHE_B', start_time: '2026-03-05T08:00:00.000Z', last_signal_at: '2026-03-05T09:00:00.000Z' })
   api.fetchWorkItem.mockImplementation(async (id) => (id === 'wi-a' ? a : b))
   const { rerender } = await renderAs('sre', <IncidentDetail id="wi-a" />)
+  await openTab('RCA')
   await userEvent.click(await screen.findByRole('button', { name: 'Write RCA' }))
-  await userEvent.type(await screen.findByLabelText('Fix Applied'), 'typed for A')
-  expect(new Date(screen.getByLabelText('Impact Start').value).toISOString()).toBe(a.start_time)
+  await userEvent.type(await screen.findByLabelText('Fix applied'), 'typed for A')
+  expect(new Date(screen.getByLabelText('Impact start').value).toISOString()).toBe(a.start_time)
   rerender(<IncidentDetail id="wi-b" />)
   await screen.findByRole('heading', { name: 'CACHE_B' })
+  await openTab('RCA')
   await userEvent.click(await screen.findByRole('button', { name: 'Write RCA' }))
-  await waitFor(() => expect(screen.getByLabelText('Fix Applied').value).toBe(''))
-  expect(new Date(screen.getByLabelText('Impact Start').value).toISOString()).toBe(b.start_time)
+  await waitFor(() => expect(screen.getByLabelText('Fix applied').value).toBe(''))
+  expect(new Date(screen.getByLabelText('Impact start').value).toISOString()).toBe(b.start_time)
 })
 
 test('Copy link writes the incident URL to the clipboard and toasts', async () => {
@@ -203,15 +208,15 @@ test('a comment draft does not follow you to the next incident (F-33)', async ()
   expect(screen.getByLabelText('Add a comment').value).toBe('')
 })
 
-test('a signals toggle sticks for that incident only, the next one starts at its own default (F-33)', async () => {
+test('a chosen tab sticks for that incident only, the next one starts at its own default (F-33)', async () => {
   api.fetchWorkItem.mockImplementation(async (id) =>
     workItem({ id, status: 'INVESTIGATING', component: id === 'wi-1' ? 'COMP_1' : 'COMP_2' }))
   const { rerender } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: /Signals/ }))
-  expect(screen.getByRole('button', { name: /Signals/ }).getAttribute('aria-expanded')).toBe('false')
+  await openTab('Activity')
+  expect((await tab('Activity')).getAttribute('aria-selected')).toBe('true')
   rerender(<IncidentDetail id="wi-2" />)
   await screen.findByRole('heading', { name: 'COMP_2' })
-  expect(screen.getByRole('button', { name: /Signals/ }).getAttribute('aria-expanded')).toBe('true')
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('true')
 })
 
 test('the signals header shows the incident\'s real count and says when the list is cut short (F-37)', async () => {
@@ -221,8 +226,7 @@ test('the signals header shows the incident\'s real count and says when the list
     { id: 's2', timestamp: new Date().toISOString(), message: 'two', severity: 'HIGH' },
   ])
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  const toggle = await screen.findByRole('button', { name: /Signals/ })
-  await waitFor(() => expect(toggle.textContent).toContain('Signals (500)'))
+  await waitFor(async () => expect((await tab('Signals')).textContent).toBe('Signals 500'))
   expect(screen.getByText(/showing the latest 2/)).toBeTruthy()
 })
 
@@ -235,8 +239,10 @@ test('a server error on the RCA fetch shows an error, not the empty form (F-38)'
 
 test('the RCA and Timeline headings sit one level under the incident heading (F-42)', async () => {
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  expect(await screen.findByRole('heading', { level: 2, name: 'Root Cause Analysis' })).toBeTruthy()
-  expect(screen.getByRole('heading', { level: 2, name: 'Timeline' })).toBeTruthy()
+  await openTab('RCA')
+  expect(await screen.findByRole('heading', { level: 2, name: 'Root cause analysis' })).toBeTruthy()
+  await openTab('Activity')
+  expect(await screen.findByRole('heading', { level: 2, name: 'Timeline' })).toBeTruthy()
 })
 
 // ---- UX step 1: the pane follows the incident's state ----
@@ -246,32 +252,28 @@ const sig = (i, over = {}) => ({
 })
 // The real API (list_signals) returns the latest 200 signals OLDEST first; keep this fixture in that order.
 const sevenSignals = () => [1, 2, 3, 4, 5, 6, 7].map(i => sig(i))
-const h2s = (container) => [...container.querySelectorAll('.detail h2')].map(h => h.textContent)
 
-test('INVESTIGATING orders the sections Signals, Timeline, Root Cause Analysis', async () => {
+const tabNames = () => screen.getAllByRole('tab').map(t => t.textContent.replace(/\s*[\d,]+$/, ''))
+
+test('the sections are tabs in the order Signals, Activity, RCA, and an active incident opens on Signals', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING', signal_count: 0 }))
-  const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await screen.findByRole('heading', { level: 2, name: 'Root Cause Analysis' })
-  const names = h2s(container)
-  expect(names).toHaveLength(3)
-  expect(names[0]).toMatch(/^Signals/)
-  expect(names[1]).toMatch(/^Timeline/)
-  expect(names[2]).toBe('Root Cause Analysis')
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('true')
+  expect(tabNames()).toEqual(['Signals', 'Activity', 'RCA'])
+  expect(screen.getByRole('tablist', { name: 'Incident sections' })).toBeTruthy()
 })
 
-test('RESOLVED orders the sections Root Cause Analysis, Timeline, Signals', async () => {
-  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', signal_count: 0 }))
-  const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await screen.findByRole('heading', { level: 2, name: 'Root Cause Analysis' })
-  const names = h2s(container)
-  expect(names[0]).toBe('Root Cause Analysis')
-  expect(names[1]).toMatch(/^Timeline/)
-  expect(names[2]).toMatch(/^Signals/)
+test.each(['RESOLVED', 'CLOSED'])('a %s incident opens on the RCA tab', async (status) => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ status, signal_count: 0 }))
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect((await tab('RCA')).getAttribute('aria-selected')).toBe('true')
+  expect(screen.getByRole('tabpanel').textContent).toContain('Root cause analysis')
 })
 
 test('INVESTIGATING without an RCA offers "Write RCA", which expands the form in place', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
+  await openTab('RCA')
   const write = await screen.findByRole('button', { name: 'Write RCA' })
   expect(screen.queryByRole('button', { name: 'Submit RCA' })).toBeNull()
   await userEvent.click(write)
@@ -288,6 +290,7 @@ test('RESOLVED without an RCA shows the form straight away, with no "Write RCA" 
 
 test('OPEN has no RCA form and no "Write RCA", only the line that says why', async () => {
   await renderAs('sre', <IncidentDetail id="wi-1" />)
+  await openTab('RCA')
   expect(await screen.findByText('Start investigating to write the RCA.')).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Submit RCA' })).toBeNull()
   expect(screen.queryByRole('button', { name: 'Write RCA' })).toBeNull()
@@ -296,6 +299,7 @@ test('OPEN has no RCA form and no "Write RCA", only the line that says why', asy
 test('a viewer on INVESTIGATING gets no "Write RCA", just the read-only text', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   await renderAs('viewer', <IncidentDetail id="wi-1" />)
+  await openTab('RCA')
   expect(await screen.findByText('No RCA has been submitted yet.')).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Write RCA' })).toBeNull()
 })
@@ -304,8 +308,7 @@ test('INVESTIGATING opens the signals without a click and shows the 5 newest, ne
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING', signal_count: 7 }))
   api.fetchSignals.mockResolvedValue(sevenSignals())
   const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  const toggle = await screen.findByRole('button', { name: /Signals/ })
-  expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('true')
   await waitFor(() => expect(container.querySelectorAll('.signal-msg')).toHaveLength(5))
   expect(container.querySelector('.signal-msg').textContent).toBe('msg 7')
   expect(screen.queryByText('msg 2')).toBeNull()
@@ -320,11 +323,12 @@ test('"Show all 7" reveals every loaded signal', async () => {
   expect(screen.queryByRole('button', { name: /Show all/ })).toBeNull()
 })
 
-test('RESOLVED starts with the signals collapsed', async () => {
+test('RESOLVED keeps the signals behind their tab', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', signal_count: 7 }))
   api.fetchSignals.mockResolvedValue(sevenSignals())
-  await renderAs('sre', <IncidentDetail id="wi-1" />)
-  expect((await screen.findByRole('button', { name: /Signals/ })).getAttribute('aria-expanded')).toBe('false')
+  const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect((await tab('Signals')).getAttribute('aria-selected')).toBe('false')
+  expect(container.querySelector('.signal-msg')).toBeNull()
 })
 
 test('the summary shows first signal, last signal, the count and the newest message', async () => {
@@ -353,7 +357,7 @@ test('the summary shows first signal, last signal, the count and the newest mess
 test('with no signals the summary has no Latest row', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING', signal_count: 0 }))
   const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await screen.findByRole('button', { name: /Signals/ })
+  await tab('Signals')
   await settle()
   expect(within(container.querySelector('.detail-card')).queryByText('Latest')).toBeNull()
 })
@@ -361,6 +365,7 @@ test('with no signals the summary has no Latest row', async () => {
 test('the open RCA form never says "approved"', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
+  await openTab('RCA')
   await userEvent.click(await screen.findByRole('button', { name: 'Write RCA' }))
   expect(container.querySelector('.detail').textContent).not.toMatch(/approved/i)
 })
@@ -377,22 +382,22 @@ const resolvedWithRca = () => {
   api.fetchRCA.mockResolvedValue(RCA_DONE)
 }
 
-test('Close Incident asks first: nothing is sent, the confirm names the MTTR and says the RCA locks', async () => {
+test('Close incident… asks first: nothing is sent, the confirm names the MTTR and says the RCA locks', async () => {
   resolvedWithRca()
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Close Incident' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
   expect(api.updateStatus).not.toHaveBeenCalled()
   expect(screen.getByText('Close RDBMS_PRIMARY? MTTR 2.0h · Infrastructure Failure. The RCA locks once closed.')).toBeTruthy()
-  expect(screen.queryByRole('button', { name: 'Close Incident' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Close incident…' })).toBeNull()
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }))
 })
 
 test('Cancel puts the Close button back and returns focus to it', async () => {
   resolvedWithRca()
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Close Incident' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
   await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-  const close = screen.getByRole('button', { name: 'Close Incident' })
+  const close = screen.getByRole('button', { name: 'Close incident…' })
   expect(screen.queryByText(/The RCA locks/)).toBeNull()
   expect(document.activeElement).toBe(close)
   expect(api.updateStatus).not.toHaveBeenCalled()
@@ -401,9 +406,9 @@ test('Cancel puts the Close button back and returns focus to it', async () => {
 test('Escape in the confirm cancels it', async () => {
   resolvedWithRca()
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Close Incident' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
   await userEvent.keyboard('{Escape}')
-  expect(screen.getByRole('button', { name: 'Close Incident' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Close incident…' })).toBeTruthy()
   expect(api.updateStatus).not.toHaveBeenCalled()
 })
 
@@ -411,7 +416,7 @@ test('confirming closes once, and the toast carries the MTTR', async () => {
   resolvedWithRca()
   api.updateStatus.mockResolvedValue(workItem({ status: 'CLOSED', mttr_seconds: 7200 }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Close Incident' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
   await userEvent.click(screen.getByRole('button', { name: 'Close incident' }))
   expect(api.updateStatus).toHaveBeenCalledTimes(1)
   expect(api.updateStatus).toHaveBeenCalledWith('wi-1', 'CLOSED')
@@ -422,18 +427,18 @@ test('a pending confirm does not follow you to another incident', async () => {
   api.fetchWorkItem.mockImplementation(async (id) => workItem({ id, status: 'RESOLVED', component: id === 'wi-1' ? 'COMP_1' : 'COMP_2' }))
   api.fetchRCA.mockResolvedValue(RCA_DONE)
   const { rerender } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Close Incident' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
   rerender(<IncidentDetail id="wi-2" />)
   await screen.findByRole('heading', { name: 'COMP_2' })
   expect(screen.queryByText(/The RCA locks/)).toBeNull()
-  expect(screen.getByRole('button', { name: 'Close Incident' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Close incident…' })).toBeTruthy()
 })
 
-test('Mark Resolved hands the incident to onResolve and sends nothing itself', async () => {
+test('Mark resolved hands the incident to onResolve and sends nothing itself', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   const onResolve = vi.fn()
   await renderAs('sre', <IncidentDetail id="wi-1" onResolve={onResolve} />)
-  await userEvent.click(await screen.findByRole('button', { name: 'Mark Resolved' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Mark resolved' }))
   expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'wi-1', component: 'RDBMS_PRIMARY' }))
   expect(api.updateStatus).not.toHaveBeenCalled()
 })
@@ -449,7 +454,7 @@ test('a blocked Close says why in visible text', async () => {
   api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED' }))
   await renderAs('sre', <IncidentDetail id="wi-1" />)
   expect(await screen.findByText('Submit the RCA to close.')).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Close Incident' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Close incident…' }).disabled).toBe(true)
 })
 
 test('a blocked Close says so when the RCA could not be checked', async () => {
@@ -462,7 +467,7 @@ test('a blocked Close says so when the RCA could not be checked', async () => {
 test('an unblocked Close shows no reason line', async () => {
   resolvedWithRca()
   await renderAs('sre', <IncidentDetail id="wi-1" />)
-  await screen.findByRole('button', { name: 'Close Incident' })
+  await screen.findByRole('button', { name: 'Close incident…' })
   expect(screen.queryByText('Submit the RCA to close.')).toBeNull()
 })
 
@@ -552,10 +557,10 @@ describe('second critique: ownership', () => {
     expect(screen.queryByRole('button', { name: 'Assign to me' })).toBeNull()
   })
 
-  test('Start Investigating on an unowned incident says it was assigned to you when the response says so', async () => {
+  test('Start investigating on an unowned incident says it was assigned to you when the response says so', async () => {
     api.updateStatus.mockResolvedValue(workItem({ status: 'INVESTIGATING', assignee_id: 'u1', assignee_username: 'me' }))
     await renderAs('sre', <IncidentDetail id="wi-1" />)
-    await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /Start investigating/ }))
     expect(await screen.findByText('Investigating · assigned to you')).toBeTruthy()
   })
 
@@ -563,7 +568,7 @@ describe('second critique: ownership', () => {
     api.fetchWorkItem.mockResolvedValue(workItem({ assignee_id: 'u2', assignee_username: 'bob' }))
     api.updateStatus.mockResolvedValue(workItem({ status: 'INVESTIGATING', assignee_id: 'u2', assignee_username: 'bob' }))
     await renderAs('sre', <IncidentDetail id="wi-1" />)
-    await userEvent.click(await screen.findByRole('button', { name: /Start Investigating/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /Start investigating/ }))
     expect(await screen.findByText('Moved to INVESTIGATING')).toBeTruthy()
   })
 
@@ -599,7 +604,7 @@ describe('second critique: grouped signals', () => {
     expect(rows[0].querySelector('.signal-count').textContent).toBe('×2')
     expect(rows[1].querySelector('.signal-msg').textContent).toBe('conn refused')
     expect(rows[1].querySelector('.signal-count').textContent).toBe('×7')
-    expect(screen.getByRole('button', { name: /Signals \(9\)/ })).toBeTruthy()  // the heading keeps the incident's real count
+    expect((await tab('Signals')).textContent).toBe('Signals 9')  // the tab keeps the incident's real count
   })
 
   test('a group with 2 or more shows when it started and a rate, one signal shows neither', async () => {
@@ -824,7 +829,7 @@ describe('fourth critique: a closed record that agrees with itself', () => {
       api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', mttr_seconds: 7200, start_time: START }))
       api.fetchRCA.mockResolvedValue({ ...RCA_DONE, ...rca })
       const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-      await screen.findByText('Impact Start')
+      await screen.findByText('Impact start')
       return container
     }
 
@@ -869,12 +874,12 @@ describe('fifth critique: claim first, state line, closing payoff', () => {
   }
 
   describe('claim first on an unowned incident', () => {
-    test('unowned INVESTIGATING: Assign to me is the primary button and Mark Resolved is secondary', async () => {
+    test('unowned INVESTIGATING: Assign to me is the primary button and Mark resolved is secondary', async () => {
       await load({ status: 'INVESTIGATING' })
       const assign = await screen.findByRole('button', { name: 'Assign to me' })
       expect(assign.classList.contains('btn-primary')).toBe(true)
       expect(assign.classList.contains('btn-link')).toBe(false)
-      const resolve = screen.getByRole('button', { name: 'Mark Resolved' })
+      const resolve = screen.getByRole('button', { name: 'Mark resolved' })
       expect(resolve.classList.contains('btn-secondary')).toBe(true)
       expect(resolve.classList.contains('btn-primary')).toBe(false)
     })
@@ -884,29 +889,29 @@ describe('fifth critique: claim first, state line, closing payoff', () => {
       await load({ status: 'INVESTIGATING' })
       await userEvent.click(await screen.findByRole('button', { name: 'Assign to me' }))
       expect(api.assignWorkItem).toHaveBeenCalledWith('wi-1', 'u1')
-      // once owned the claim is done: no Assign to me, and Mark Resolved is primary again
+      // once owned the claim is done: no Assign to me, and Mark resolved is primary again
       await waitFor(() => expect(screen.queryByRole('button', { name: 'Assign to me' })).toBeNull())
-      expect(screen.getByRole('button', { name: 'Mark Resolved' }).classList.contains('btn-primary')).toBe(true)
+      expect(screen.getByRole('button', { name: 'Mark resolved' }).classList.contains('btn-primary')).toBe(true)
     })
 
-    test('owned INVESTIGATING: Mark Resolved is primary, and Assign to me stays a text link when someone else owns it', async () => {
+    test('owned INVESTIGATING: Mark resolved is primary, and Assign to me stays a text link when someone else owns it', async () => {
       await load({ status: 'INVESTIGATING', assignee_id: 'u2', assignee_username: 'bob' })
-      const resolve = await screen.findByRole('button', { name: 'Mark Resolved' })
+      const resolve = await screen.findByRole('button', { name: 'Mark resolved' })
       expect(resolve.classList.contains('btn-primary')).toBe(true)
       expect(resolve.classList.contains('btn-secondary')).toBe(false)
       expect(screen.getByRole('button', { name: 'Assign to me' }).classList.contains('btn-link')).toBe(true)
     })
 
-    test('OPEN is unchanged: Start Investigating is primary and Assign to me is a text link', async () => {
+    test('OPEN is unchanged: Start investigating is primary and Assign to me is a text link', async () => {
       await load({ status: 'OPEN' })
-      expect((await screen.findByRole('button', { name: 'Start Investigating' })).classList.contains('btn-primary')).toBe(true)
+      expect((await screen.findByRole('button', { name: 'Start investigating' })).classList.contains('btn-primary')).toBe(true)
       expect(screen.getByRole('button', { name: 'Assign to me' }).classList.contains('btn-link')).toBe(true)
     })
 
     test('a viewer gets neither button on an unowned INVESTIGATING incident', async () => {
       await load({ status: 'INVESTIGATING' }, 'viewer')
       expect(screen.queryByRole('button', { name: 'Assign to me' })).toBeNull()
-      expect(screen.queryByRole('button', { name: 'Mark Resolved' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Mark resolved' })).toBeNull()
     })
   })
 
@@ -992,7 +997,7 @@ describe('fifth critique: claim first, state line, closing payoff', () => {
       const summary = within(await waitFor(() => { const e = container.querySelector('.detail-summary'); expect(e).not.toBeNull(); return e }))
       for (const label of ['First signal', 'Last signal', 'Signals', 'Resolved by', 'Closed by']) expect(summary.getByText(label)).toBeTruthy()
       expect(summary.queryByText('Fix applied')).toBeNull()
-      expect(screen.getByText('Fix Applied')).toBeTruthy()  // it lives in the RCA card below
+      expect(screen.getByText('Fix applied')).toBeTruthy()  // it lives in the RCA card below
     })
 
     test('the impact-window warning shows on RESOLVED but not on CLOSED', async () => {
@@ -1003,7 +1008,7 @@ describe('fifth critique: claim first, state line, closing payoff', () => {
       expect(await screen.findByText(/This impact window starts before the first signal/)).toBeTruthy()
       resolved.unmount()
       const closed = await load({ status: 'CLOSED', mttr_seconds: 7200, start_time: START })
-      await screen.findByText('Impact Start')
+      await screen.findByText('Impact start')
       expect(closed.container.textContent).not.toMatch(/before the first signal/)
     })
 
@@ -1073,7 +1078,7 @@ describe('harden', () => {
       id: `s${i}`, timestamp: new Date(now - (1200 - i) * 1000).toISOString(), message: 'conn refused', severity: 'HIGH',
     })))
     const { container } = await renderAs('sre', <IncidentDetail id="wi-1" />)
-    expect(await screen.findByRole('button', { name: 'Signals (12,345)' })).toBeTruthy()
+    expect((await tab('Signals')).textContent).toBe('Signals 12,345')
     expect(container.querySelector('.detail-summary').textContent).toContain('12,345')
     expect(container.querySelector('.signal-count').textContent).toBe('×1,200')
   })
@@ -1103,4 +1108,40 @@ describe('RCA due on a resolved incident', () => {
     const c = await load({ resolved_at: ago(75 * HOUR), end_time: ago(HOUR), mttr_seconds: 3600 })
     expect(c.querySelector('.state-line')).toBeNull()
   })
+})
+
+test('an unsent comment survives a switch to another tab and back', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  await openTab('Activity')
+  await userEvent.type(await screen.findByRole('textbox', { name: 'Add a comment' }), 'half written')
+  await openTab('Signals')
+  expect(screen.queryByRole('textbox', { name: 'Add a comment' })).toBeNull()  // hidden while another tab is open
+  await openTab('Activity')
+  expect(screen.getByRole('textbox', { name: 'Add a comment' }).value).toBe('half written')
+})
+
+test('the card has a deselect button that calls onClose, and none without onClose', async () => {
+  const onClose = vi.fn()
+  const { rerender } = await renderAs('sre', <IncidentDetail id="wi-1" onClose={onClose} />)
+  const btn = await screen.findByRole('button', { name: 'Deselect incident' })
+  expect(btn.getAttribute('title')).toBe('Deselect (Esc)')
+  await userEvent.click(btn)
+  expect(onClose).toHaveBeenCalled()
+  rerender(<IncidentDetail id="wi-1" />)
+  expect(screen.queryByRole('button', { name: 'Deselect incident' })).toBeNull()
+})
+
+test('Escape inside the Close confirm dismisses the confirm and does not reach the page', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED', mttr_seconds: 3600 }))
+  api.fetchRCA.mockResolvedValue({ incident_start: '2026-01-01T10:00:00Z', incident_end: '2026-01-01T12:00:00Z', root_cause_category: 'Infrastructure Failure', fix_applied: 'x', prevention_steps: 'y', submitted_at: '2026-01-01T12:30:00Z' })
+  const outside = vi.fn()
+  document.addEventListener('keydown', outside)
+  try {
+    await renderAs('sre', <IncidentDetail id="wi-1" />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Close incident…' }))
+    await userEvent.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Close incident…' })).toBeTruthy()
+    expect(outside.mock.calls.some(([e]) => e.key === 'Escape')).toBe(false)
+  } finally { document.removeEventListener('keydown', outside) }
 })

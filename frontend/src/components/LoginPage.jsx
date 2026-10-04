@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Button } from '@heroui/react';
 import { useAuth } from '../context/auth';
 import { errorMessage } from '../api/client';
 import { ErrorNote } from './ErrorNote';
@@ -41,9 +42,9 @@ export function LoginPage() {
 
           {error && <ErrorNote>{error}</ErrorNote>}
 
-          <button type="submit" disabled={loading} className="btn btn-primary login-submit">
-            {loading ? <span className="spinner" /> : 'Sign in'}
-          </button>
+          <Button type="submit" isPending={loading} fullWidth className="login-submit">
+            {loading ? 'Signing in…' : 'Sign in'}
+          </Button>
           <p className="login-note">Accounts are created by an administrator.</p>
         </form>
       </div>

@@ -1,0 +1,77 @@
+/* ==========================================================================
+   Nullify "Orchid" theme: HeroUI v3 tokens overridden for light and dark.
+   One accent (orchid, hue 318, between violet and magenta); severity is the only other colour.
+   theme.js always sets data-theme (and .dark), resolving "system" itself, because HeroUI's
+   tokens switch only on those, never on prefers-color-scheme.
+   Imported after @heroui/styles in the same `base` layer, so these win by order.
+   ========================================================================== */
+@layer base {
+  :root,
+  [data-theme="light"] {
+    --radius: 0.625rem;
+
+    --background: oklch(0.985 0.004 318);
+    --foreground: oklch(0.21 0.015 318);
+    --surface: oklch(1 0 0);
+    --surface-secondary: oklch(0.965 0.006 318);
+    --surface-tertiary: oklch(0.945 0.008 318);
+    --overlay: oklch(1 0 0);
+    --muted: oklch(0.5 0.015 318);
+    --default: oklch(0.95 0.006 318);
+    --default-foreground: var(--foreground);
+    --field-background: oklch(1 0 0);
+    --segment: oklch(1 0 0);
+
+    --accent: oklch(0.5 0.19 318);
+    --accent-foreground: oklch(1 0 0);
+    --link: var(--accent);
+
+    --border: oklch(0.91 0.008 318);
+    --separator: oklch(0.93 0.006 318);
+
+    --danger: oklch(0.55 0.2 27);
+    --danger-foreground: oklch(1 0 0);
+    --success: oklch(0.55 0.13 160);
+    --success-foreground: oklch(1 0 0);
+
+    /* Severity and state (the only chroma besides the accent) */
+    --sev-p0: #B6271D;
+    --sev-p1: #994A08;
+    --sev-p2: #795D00;
+    --sev-p3: #5F6267;
+    --state-resolved: #0B7B54;
+  }
+
+  .dark,
+  [data-theme="dark"] {
+    --background: oklch(0.16 0.012 318);
+    --foreground: oklch(0.96 0.005 318);
+    --surface: oklch(0.2 0.014 318);
+    --surface-secondary: oklch(0.235 0.016 318);
+    --surface-tertiary: oklch(0.27 0.018 318);
+    --overlay: oklch(0.22 0.015 318);
+    --muted: oklch(0.72 0.015 318);
+    --default: oklch(0.26 0.016 318);
+    --default-foreground: var(--foreground);
+    --field-background: var(--default);
+    --segment: oklch(0.34 0.02 318);
+
+    --accent: oklch(0.72 0.16 318);
+    --accent-foreground: oklch(0.2 0.03 318);
+    --link: var(--accent);
+
+    --border: oklch(0.28 0.016 318);
+    --separator: oklch(0.25 0.014 318);
+
+    --danger: oklch(0.68 0.19 27);
+    --danger-foreground: oklch(0.2 0.03 318);
+    --success: oklch(0.74 0.15 160);
+    --success-foreground: oklch(0.2 0.03 318);
+
+    --sev-p0: #FF5A4E;
+    --sev-p1: #FF9A3D;
+    --sev-p2: #E8C547;
+    --sev-p3: #8A8F98;
+    --state-resolved: #2BC48A;
+  }
+}

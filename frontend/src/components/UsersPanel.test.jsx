@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { UsersPanel } from './UsersPanel'
 import * as api from '../api/client'
@@ -6,7 +6,7 @@ import { renderAs, httpError } from '../test/utils'
 
 vi.mock('../api/client', async (orig) => ({
   ...(await orig()),
-  refreshSession: vi.fn(), listAccounts: vi.fn(), createUser: vi.fn(), updateUser: vi.fn(),
+  refreshSession: vi.fn(), listAccounts: vi.fn(), createUser: vi.fn(), updateUser: vi.fn(), deleteUser: vi.fn(),
 }))
 
 const ACCOUNTS = [
@@ -107,4 +107,51 @@ test('the reset password input requires 12 characters', async () => {
   const bob = await row('bob')
   await userEvent.click(within(bob).getByRole('button', { name: 'Reset password' }))
   expect(within(bob).getByLabelText('New password for bob').minLength).toBe(12)
+})
+
+describe('deleting an account', () => {
+  test('every row but your own has a Delete button', async () => {
+    await renderAs('admin', <UsersPanel />)
+    expect(within(await row('bob')).getByRole('button', { name: 'Delete bob' })).toBeTruthy()
+    expect(within(await row('me')).queryByRole('button', { name: /Delete/ })).toBeNull()
+  })
+
+  test('Delete asks first, and Cancel sends nothing and puts focus back on Delete', async () => {
+    await renderAs('admin', <UsersPanel />)
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+    const bob = await row('bob')
+    expect(bob.textContent).toContain('Delete bob? They can\'t sign in again.')
+    expect(within(bob).getByRole('button', { name: 'Cancel' }) === document.activeElement).toBe(true)
+    await userEvent.click(within(bob).getByRole('button', { name: 'Cancel' }))
+    expect(api.deleteUser).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+  })
+
+  test('Escape cancels the confirm', async () => {
+    await renderAs('admin', <UsersPanel />)
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+    await userEvent.keyboard('{Escape}')
+    expect(within(await row('bob')).queryByRole('button', { name: 'Delete account' })).toBeNull()
+    expect(api.deleteUser).not.toHaveBeenCalled()
+  })
+
+  test('confirming deletes the account, reloads the list and says so', async () => {
+    api.deleteUser.mockResolvedValue()
+    await renderAs('admin', <UsersPanel />)
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+    api.listAccounts.mockResolvedValue(ACCOUNTS.filter(a => a.id !== 'u2'))
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete account' }))
+    expect(api.deleteUser).toHaveBeenCalledWith('u2')
+    expect(await screen.findByText('Deleted bob')).toBeTruthy()
+    await waitFor(() => expect(screen.queryByText('bob')).toBeNull())
+  })
+
+  test('a failed delete shows the error and keeps the row', async () => {
+    api.deleteUser.mockRejectedValue(httpError(400, 'You cannot delete your own account'))
+    await renderAs('admin', <UsersPanel />)
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete account' }))
+    expect(await screen.findByText('You cannot delete your own account')).toBeTruthy()
+    expect(screen.getByText('bob')).toBeTruthy()
+  })
 })

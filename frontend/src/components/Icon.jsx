@@ -18,6 +18,8 @@ const PATHS = {
   x: <><path d="M18 6 6 18" /><path d="m6 6 12 12" /></>,
   download: <><path d="M12 15V3" /><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /></>,
   check: <path d="M20 6 9 17l-5-5" />,
+  filter: <><path d="M3 6h18" /><path d="M7 12h10" /><path d="M10 18h4" /></>,
+  'arrow-up-down': <><path d="m21 16-4 4-4-4" /><path d="M17 20V4" /><path d="m3 8 4-4 4 4" /><path d="M7 4v16" /></>,
   link: <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
   null: <><circle cx="12" cy="12" r="8" /><path d="M6.3 17.7 17.7 6.3" /></>,
 };

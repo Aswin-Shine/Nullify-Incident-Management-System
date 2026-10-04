@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { listAccounts, createUser, updateUser, errorMessage } from '../api/client';
+import { useState, useEffect, useRef } from 'react';
+import { listAccounts, createUser, updateUser, deleteUser, errorMessage } from '../api/client';
 import { useAuth } from '../context/auth';
+import { useToast } from '../context/toast';
 import { useQuery } from '../hooks/useQuery';
 import { ErrorNote } from './ErrorNote';
 import { Field } from './Field';
@@ -23,8 +24,43 @@ function ResetPassword({ username, onSave }) {
   );
 }
 
+// Delete asks first, in the row. The account is erased (it can't sign in, and its name is freed) but the incident
+// record keeps what the person did, as "Deleted user". `onDelete` resolves true on success.
+function DeleteUser({ username, onDelete }) {
+  const [confirming, setConfirming] = useState(false);
+  const deleteRef = useRef(null);
+  const cancelRef = useRef(null);
+  const wasConfirming = useRef(false);
+  // Focus follows the confirm: Cancel when it opens, Delete again when it is dismissed.
+  useEffect(() => {
+    if (confirming) cancelRef.current?.focus();
+    else if (wasConfirming.current) deleteRef.current?.focus();
+    wasConfirming.current = confirming;
+  }, [confirming]);
+
+  if (!confirming) return (
+    <button type="button" ref={deleteRef} className="btn-link danger-link" aria-label={`Delete ${username}`} onClick={() => setConfirming(true)}>
+      Delete
+    </button>
+  );
+  return (
+    // An inline confirm, not a modal, like Close incident: Escape dismisses it.
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+    <div className="delete-confirm" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setConfirming(false); } }}>
+      <p>Delete {username}? They can't sign in again. Their open incidents become unassigned; their comments stay as "Deleted user".</p>
+      <div className="delete-confirm-actions">
+        <button type="button" ref={cancelRef} className="btn btn-secondary" onClick={() => setConfirming(false)}>Cancel</button>
+        <button type="button" className="btn btn-danger" onClick={async () => { if (!(await onDelete())) setConfirming(false); }}>
+          Delete account
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function UsersPanel() {
   const { user: me } = useAuth();
+  const toast = useToast();
   const accounts = useQuery('accounts', listAccounts);
   const [error, setError] = useState('');
   const [form, setForm] = useState(NEW_USER);
@@ -55,7 +91,7 @@ export function UsersPanel() {
         {accounts.error && <ErrorNote>{errorMessage(accounts.error, 'Could not load users')}</ErrorNote>}
         <table className="users-table">
           <thead>
-            <tr><th>Username</th><th>Email</th><th>Role</th><th>Active</th><th>Password</th></tr>
+            <tr><th>Username</th><th>Email</th><th>Role</th><th>Active</th><th>Password</th><th><span className="sr-only">Delete</span></th></tr>
           </thead>
           <tbody>
             {(accounts.data ?? []).map(u => {
@@ -75,6 +111,15 @@ export function UsersPanel() {
                       onChange={e => run(() => updateUser(u.id, { is_active: e.target.checked }))} />
                   </td>
                   <td><ResetPassword username={u.username} onSave={(password) => run(() => updateUser(u.id, { password }))} /></td>
+                  <td>
+                    {!self && (
+                      <DeleteUser username={u.username} onDelete={async () => {
+                        const ok = await run(() => deleteUser(u.id));
+                        if (ok) toast(`Deleted ${u.username}`);
+                        return ok;
+                      }} />
+                    )}
+                  </td>
                 </tr>
               );
             })}
