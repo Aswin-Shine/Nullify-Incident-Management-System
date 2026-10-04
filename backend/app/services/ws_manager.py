@@ -18,6 +18,7 @@ from app.db import cache
 logger = logging.getLogger("ims.ws")
 
 RECONNECT_DELAY = 1.0
+SEND_TIMEOUT = 2.0  # one stalled client must not hold up the rest of a broadcast
 
 
 class ConnectionManager:
@@ -26,6 +27,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._pubsub = None
+        self._subscribed = False  # True only while the Redis subscription is live
 
     @property
     def channel(self) -> str:
@@ -46,10 +48,12 @@ class ConnectionManager:
         """Subscribe to the fan-out channel and deliver what arrives to this process's sockets."""
         self._pubsub = cache._r().pubsub()
         await self._pubsub.subscribe(self.channel)
+        self._subscribed = True
         self._task = asyncio.create_task(self._listen())
 
     async def stop(self):
         task, self._task = self._task, None
+        self._subscribed = False
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -73,30 +77,32 @@ class ConnectionManager:
                 raise
             except Exception as e:
                 logger.warning("WebSocket fan-out listener lost Redis (%s); retrying", e)
+            self._subscribed = False  # nobody hears a publish until we resubscribe, so broadcast delivers locally
             await asyncio.sleep(RECONNECT_DELAY)
             try:
                 await self._close_pubsub()
                 self._pubsub = cache._r().pubsub()
                 await self._pubsub.subscribe(self.channel)
+                self._subscribed = True
             except Exception as e:
                 logger.warning("WebSocket fan-out resubscribe failed (%s); retrying", e)
 
     async def _send_local(self, payload: str):
-        dead = []
         async with self._lock:
             conns = list(self._connections)
-        for ws in conns:
+
+        async def send(ws):
             try:
-                await ws.send_text(payload)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            await self.disconnect(ws)
+                await asyncio.wait_for(ws.send_text(payload), SEND_TIMEOUT)
+            except Exception:  # includes the timeout: drop sockets that error or stall
+                await self.disconnect(ws)
+
+        await asyncio.gather(*(send(ws) for ws in conns))
 
     async def broadcast(self, data: Any):
         payload = json.dumps(data)
         # ponytail: one publish per API request; batching server-side comes with payload events (ADR-006).
-        if self._task is not None and not self._task.done():
+        if self._subscribed and self._task is not None and not self._task.done():
             try:
                 await cache._r().publish(self.channel, payload)  # our own listener delivers it back
                 return

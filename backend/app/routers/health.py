@@ -6,7 +6,7 @@
               get the backend restarted in a loop.
 """
 from __future__ import annotations
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +61,7 @@ async def health(db: AsyncSession = Depends(get_db)):
 @router.get("/api/timeseries")
 async def timeseries(
     component: str | None = None,
-    limit: int = 60,
+    limit: int = Query(60, ge=1, le=1440),
     _: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):

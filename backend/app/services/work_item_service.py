@@ -50,6 +50,7 @@ def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
         assignee_username=wi.assignee.username if wi.assignee else None,
         start_time=wi.start_time,
         end_time=wi.end_time,
+        resolved_at=wi.resolved_at,
         mttr_seconds=wi.mttr_seconds,
         sla_deadline=wi.sla_deadline,
         sla_breached=sla_breached,
@@ -184,9 +185,10 @@ async def list_work_items(
     db: AsyncSession, status: str | None = None, limit: int = 100, cursor: str | None = None,
     q: str | None = None, priority: str | None = None, assignee: str | None = None,
 ) -> dict:
-    """One page, ordered priority then newest first then id: {"items": [...], "next_cursor": str | None}.
+    """One page, ordered priority then newest first then id: {"items": [...], "next_cursor": str | None, "total": int}
+    (`total` counts every row matching the filters, not just this page).
 
-    Filters: `q` is a literal, case-insensitive substring of the component; `assignee` is a user id or
+    Filters: `status` is one status or "ACTIVE" (OPEN or INVESTIGATING); `q` is a literal, case-insensitive substring of the component; `assignee` is a user id or
     "none" (unassigned). The router has already validated them and resolved "me" to the caller's id.
 
     Keyset pagination: the cursor is the last row's sort key, so pages stay stable while incidents
@@ -201,17 +203,21 @@ async def list_work_items(
     if cached:
         return cached
 
-    stmt = select(WorkItem).options(selectinload(WorkItem.assignee))
-    if status:
-        stmt = stmt.where(WorkItem.status == status)
+    # One list of filter clauses feeds both the page and the total, so the two cannot drift.
+    filters = []
+    if status == "ACTIVE":  # the incidents someone still has to act on
+        filters.append(WorkItem.status.in_(["OPEN", "INVESTIGATING"]))
+    elif status:
+        filters.append(WorkItem.status == status)
     if priority:
-        stmt = stmt.where(WorkItem.priority == priority)
+        filters.append(WorkItem.priority == priority)
     if assignee == "none":
-        stmt = stmt.where(WorkItem.assignee_id.is_(None))
+        filters.append(WorkItem.assignee_id.is_(None))
     elif assignee:
-        stmt = stmt.where(WorkItem.assignee_id == assignee)
+        filters.append(WorkItem.assignee_id == assignee)
     if q:
-        stmt = stmt.where(WorkItem.component.ilike(f"%{_like_escape(q)}%", escape="\\"))
+        filters.append(WorkItem.component.ilike(f"%{_like_escape(q)}%", escape="\\"))
+    stmt = select(WorkItem).options(selectinload(WorkItem.assignee)).where(*filters)
     if after:
         p, c, i = after
         stmt = stmt.where(or_(WorkItem.priority > p,
@@ -219,9 +225,11 @@ async def list_work_items(
     stmt = stmt.order_by(WorkItem.priority, WorkItem.created_at.desc(), WorkItem.id.desc()).limit(limit + 1)
 
     rows = (await db.execute(stmt)).scalars().all()
+    total = (await db.execute(select(func.count()).select_from(WorkItem).where(*filters))).scalar_one()  # ignores cursor and limit
     page = {
         "items": [_wi_to_response(wi).model_dump(mode="json") for wi in rows[:limit]],
         "next_cursor": _encode_cursor(rows[limit - 1]) if len(rows) > limit else None,
+        "total": total,
     }
     await cache.set_val(cache_key, page, ttl=30)
     return page
@@ -241,18 +249,25 @@ async def transition_status(
     """Move a Work Item through the state machine with a compare-and-set UPDATE.
 
     The write applies only if the status is still the one we validated against (and, for CLOSED,
-    an RCA exists), so concurrent requests cannot both win. Commits before any side effect.
+    an RCA exists), so concurrent requests cannot both win. Starting an investigation also claims an
+    unowned incident for the actor (an existing owner is kept). Commits before any side effect.
     """
-    current = (await db.execute(select(WorkItem.status).where(WorkItem.id == wi_id))).scalar_one_or_none()
-    if current is None:
+    row = (await db.execute(select(WorkItem.status, WorkItem.assignee_id).where(WorkItem.id == wi_id))).one_or_none()
+    if row is None:
         raise ValueError(f"Work item {wi_id} not found")
+    current, owner_before = row
 
     target = get_state(current).transition_to(new_status)
 
     conditions = [WorkItem.id == wi_id, WorkItem.status == current, *target.entry_conditions(wi_id)]
+    values = {"status": new_status, "updated_at": _now()}
+    if new_status == "RESOLVED":
+        values["resolved_at"] = values["updated_at"]
+    if new_status == "INVESTIGATING" and actor_id:
+        values["assignee_id"] = func.coalesce(WorkItem.assignee_id, actor_id)
     updated = (await db.execute(
-        update(WorkItem).where(*conditions).values(status=new_status, updated_at=_now()).returning(WorkItem.id)
-    )).scalar_one_or_none()
+        update(WorkItem).where(*conditions).values(**values).returning(WorkItem.id, WorkItem.assignee_id)
+    )).one_or_none()
 
     if updated is None:
         latest = (await db.execute(select(WorkItem.status).where(WorkItem.id == wi_id))).scalar_one()
@@ -261,6 +276,9 @@ async def transition_status(
         raise ValueError(target.guard_message)
 
     record_event(db, wi_id, "status", actor_id, current, new_status)  # same transaction as the UPDATE
+    if actor_id and owner_before is None and updated.assignee_id == actor_id:
+        claimer = await db.get(User, actor_id)
+        record_event(db, wi_id, "assigned", actor_id, None, claimer.username if claimer else None)
     await db.commit()
     await invalidate_cache(wi_id)
     return await _load_response(wi_id, db)
@@ -276,6 +294,8 @@ async def assign_work_item(
     new_owner = await db.get(User, assignee_id) if assignee_id is not None else None
     if assignee_id is not None and new_owner is None:
         raise ValueError("Assignee not found")  # 422 instead of a foreign-key 500 at commit
+    if new_owner is not None and not (new_owner.is_active and new_owner.role in ("sre", "admin")):
+        raise ValueError("Assignee must be an active SRE or admin")
     if wi.assignee_id != assignee_id:
         old_owner = await db.get(User, wi.assignee_id) if wi.assignee_id else None
         record_event(db, wi_id, "assigned", actor_id,

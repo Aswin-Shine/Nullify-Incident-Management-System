@@ -58,7 +58,8 @@ class WorkItem(Base):
     description: Mapped[str | None] = mapped_column(Text)
     assignee_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # RCA submission
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     mttr_seconds: Mapped[int | None] = mapped_column(Integer)
     sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     signal_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

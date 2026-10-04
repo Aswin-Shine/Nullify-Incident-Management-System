@@ -101,8 +101,25 @@ async def test_resolving_pages_pagerduty_only_when_the_strategy_has_that_channel
     with patch("app.services.webhooks._pagerduty_resolve", new_callable=AsyncMock) as resolve, \
             patch("app.services.webhooks._slack_notify", new_callable=AsyncMock):
         await real_notify_changed({"id": "1", "component": "RDBMS_PRIMARY", "priority": "P0"}, "RESOLVED")
-        await real_notify_changed({"id": "2", "component": "CACHE_X", "priority": "P0"}, "RESOLVED")
+        await real_notify_changed({"id": "2", "component": "CACHE_X", "priority": "P2"}, "RESOLVED")
         assert resolve.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolving_pages_pagerduty_when_the_priority_came_from_component_type():
+    """B-33: the work item does not store component_type, so the name alone said Slack only."""
+    with patch("app.services.webhooks._pagerduty_resolve", new_callable=AsyncMock) as resolve, \
+            patch("app.services.webhooks._slack_notify", new_callable=AsyncMock):
+        await real_notify_changed({"id": "1", "component": "ORDERS_MAIN", "priority": "P0"}, "RESOLVED")
+        assert resolve.call_count == 1
+
+
+def test_channels_for_priority_matches_every_strategy():
+    """Drift guard: status changes derive channels from the stored priority, creation from the strategy."""
+    from app.services.alert_strategy import channels_for_priority
+    for strategy in (RDBMSAlertStrategy(), CacheAlertStrategy(), QueueAlertStrategy(), APIAlertStrategy(),
+                     MCPAlertStrategy(), DefaultAlertStrategy()):
+        assert strategy.channels == channels_for_priority(strategy.priority()), type(strategy).__name__
 
 
 # -- component_type on the signal payload ------------------------------------

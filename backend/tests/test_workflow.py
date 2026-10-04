@@ -285,6 +285,52 @@ async def test_status_filter_and_pagination_work_together(client, make_headers):
     assert {i for p in pages for i in p} == {ids[0], ids[2], ids[3]}
 
 
+async def test_status_active_means_open_or_investigating(client, make_headers):
+    headers = await make_headers("viewer")
+    ids = await make_items(["P0", "P1", "P2", "P3"])
+    await set_status(ids[1], "INVESTIGATING")
+    await set_status(ids[2], "RESOLVED")
+    await set_status(ids[3], "CLOSED")
+
+    r = await client.get("/api/work-items", params={"status": "ACTIVE"}, headers=headers)
+
+    assert r.status_code == 200
+    assert {i["id"] for i in r.json()["items"]} == {ids[0], ids[1]}
+
+
+async def test_list_total_counts_every_match_not_just_the_page(client, make_headers):
+    headers = await make_headers("viewer")
+    await make_items(["P0", "P1", "P2"])
+
+    r = await client.get("/api/work-items", params={"limit": 2}, headers=headers)
+    rest = await client.get("/api/work-items", params={"limit": 2, "cursor": r.json()["next_cursor"]}, headers=headers)
+
+    assert r.json()["total"] == 3 and len(r.json()["items"]) == 2 and r.json()["next_cursor"] is not None
+    assert rest.json()["total"] == 3  # the cursor does not shrink the count
+
+
+async def test_list_total_follows_the_same_filters_as_the_rows(client, make_headers):
+    headers = await make_headers("viewer")
+    ids = await make_items(["P0", "P1", "P2", "P0"])
+    await set_status(ids[1], "INVESTIGATING")
+    await set_status(ids[2], "RESOLVED")
+
+    active = await client.get("/api/work-items", params={"status": "ACTIVE", "limit": 1}, headers=headers)
+    p0 = await client.get("/api/work-items", params={"priority": "P0"}, headers=headers)
+    search = await client.get("/api/work-items", params={"q": "c1"}, headers=headers)
+    none = await client.get("/api/work-items", params={"status": "CLOSED"}, headers=headers)
+
+    assert active.json()["total"] == 3  # OPEN and INVESTIGATING only
+    assert p0.json()["total"] == 2
+    assert search.json()["total"] == 1
+    assert none.json() == {"items": [], "next_cursor": None, "total": 0}
+
+
+async def test_unknown_status_filter_is_422(client, make_headers):
+    r = await client.get("/api/work-items", params={"status": "BOGUS"}, headers=await make_headers("viewer"))
+    assert r.status_code == 422
+
+
 async def test_list_cache_is_invalidated_without_scanning_redis_keys(client, make_headers):
     from app.db import cache
 
@@ -401,3 +447,107 @@ async def test_assignee_me_cache_is_per_user(client, make_user):
 
     assert await components(client, hdr(a), assignee="me") == {"FOR_A"}
     assert await components(client, hdr(b), assignee="me") == {"FOR_B"}
+
+
+# -- B-34: webhooks never hold up the response -------------------------------
+
+async def test_status_patch_does_not_wait_for_the_webhooks(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    gate = asyncio.Event()
+
+    async def never_finishes(*args, **kwargs):
+        await gate.wait()
+
+    with patch("app.routers.work_items.webhooks.notify_status_change", new=never_finishes):
+        r = await asyncio.wait_for(
+            client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers), 2)
+        gate.set()
+        await asyncio.sleep(0.05)
+
+    assert r.status_code == 200
+
+
+async def test_spawn_keeps_a_reference_until_the_task_finishes():
+    from app.services import webhooks
+    gate = asyncio.Event()
+
+    async def work():
+        await gate.wait()
+
+    task = webhooks.spawn(work())
+    assert len(webhooks._background) == 1
+    gate.set()
+    await task
+    await asyncio.sleep(0)
+    assert len(webhooks._background) == 0
+
+
+# -- Start Investigating claims an unowned incident ------------------------------
+
+async def history_kinds(client, headers, wi_id):
+    r = await client.get(f"/api/work-items/{wi_id}/history", headers=headers)
+    return [(e["kind"], e["to_value"]) for e in r.json()]
+
+
+async def test_investigating_claims_an_unassigned_incident_for_the_actor(client, make_user):
+    me = await make_user("sre")
+    headers = {"Authorization": f"Bearer {create_access_token({'sub': me['id'], 'role': 'sre', 'tv': 0})}"}
+    wi_id = await process_signal(sig())
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["assignee_id"] == me["id"]
+    assert r.json()["assignee_username"] == me["username"]
+    events = await history_kinds(client, headers, wi_id)
+    assert [k for k, _ in events] == ["created", "status", "assigned"]
+    assert events[-1] == ("assigned", me["username"])
+
+
+async def test_investigating_keeps_an_existing_owner_and_records_no_assignment(client, make_user):
+    me, owner = await make_user("sre"), await make_user("sre")
+    headers = {"Authorization": f"Bearer {create_access_token({'sub': me['id'], 'role': 'sre', 'tv': 0})}"}
+    wi_id = await process_signal(sig())
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(WorkItem).where(WorkItem.id == wi_id).values(assignee_id=owner["id"]))
+        await db.commit()
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers)
+
+    assert r.json()["assignee_id"] == owner["id"]
+    assert [k for k, _ in await history_kinds(client, headers, wi_id)] == ["created", "status"]
+
+
+async def test_resolving_an_unassigned_incident_does_not_assign_it(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    await set_status(wi_id, "INVESTIGATING")
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED"}, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["assignee_id"] is None
+    assert [k for k, _ in await history_kinds(client, headers, wi_id)] == ["created", "status"]
+
+
+async def test_resolving_records_resolved_at_and_closing_keeps_it(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    url = f"/api/work-items/{wi_id}/status"
+
+    r = await client.patch(url, json={"new_status": "INVESTIGATING"}, headers=headers)
+    assert r.json()["resolved_at"] is None
+
+    before = datetime.now(timezone.utc)
+    r = await client.patch(url, json={"new_status": "RESOLVED"}, headers=headers)
+    resolved_at = datetime.fromisoformat(r.json()["resolved_at"])
+    assert resolved_at >= before - timedelta(seconds=1)
+    assert await committed(WorkItem.resolved_at, wi_id) == resolved_at
+
+    listed = (await client.get("/api/work-items", params={"status": "RESOLVED"}, headers=headers)).json()["items"]
+    assert datetime.fromisoformat(listed[0]["resolved_at"]) == resolved_at
+
+    assert (await client.post(f"/api/work-items/{wi_id}/rca", json=RCA, headers=headers)).status_code == 200
+    r = await client.patch(url, json={"new_status": "CLOSED"}, headers=headers)
+    assert datetime.fromisoformat(r.json()["resolved_at"]) == resolved_at

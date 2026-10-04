@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -91,6 +91,42 @@ async def test_channel_is_scoped_to_the_redis_db():
 
         await eventually(lambda: ws.sent)
         await asyncio.sleep(0.1)
+        assert [json.loads(m) for m in ws.sent] == [EVENT]
+    finally:
+        await manager.stop()
+
+
+# -- B-30 / B-31 --------------------------------------------------------------
+
+class HangingSocket:
+    async def send_text(self, text):
+        await asyncio.Event().wait()
+
+
+async def test_a_socket_that_never_returns_does_not_stall_the_others_and_is_dropped():
+    manager = ConnectionManager()
+    slow, fast = HangingSocket(), FakeSocket()
+    await manager.register(slow)
+    await manager.register(fast)
+
+    with patch("app.services.ws_manager.SEND_TIMEOUT", 0.1):
+        await asyncio.wait_for(manager.broadcast(EVENT), 1)
+
+    assert [json.loads(m) for m in fast.sent] == [EVENT]
+    assert manager._connections == [fast]
+
+
+async def test_broadcast_delivers_locally_while_the_listener_has_lost_redis():
+    manager = ConnectionManager()
+    ws = FakeSocket()
+    await manager.start()
+    try:
+        await manager.register(ws)
+        manager._subscribed = False  # the state the listener's error path leaves until it resubscribes
+        with patch.object(cache._r(), "publish", new_callable=AsyncMock) as publish:
+            await manager.broadcast(EVENT)
+
+        publish.assert_not_awaited()  # a publish nobody is subscribed to would be lost
         assert [json.loads(m) for m in ws.sent] == [EVENT]
     finally:
         await manager.stop()

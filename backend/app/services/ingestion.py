@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import get_settings
+from app.db import cache
 from app.db.nosql import append_signal
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg
 from app.db.retry import with_db_retry
@@ -109,7 +110,7 @@ async def process_signal(signal: dict) -> str | None:
     if wi is not None and wi.created:
         # Side effects only after commit: the dashboard must see the new incident, and page once.
         await invalidate_cache()
-        asyncio.create_task(webhooks.notify_incident_created({
+        webhooks.spawn(webhooks.notify_incident_created({
             "id": wi.id, "component": wi.component, "priority": wi.priority,
             "title": wi.title, "description": wi.description, "component_type": record.get("component_type"),
         }))
@@ -117,6 +118,14 @@ async def process_signal(signal: dict) -> str | None:
             "event": "work_item_created", "id": wi.id, "component": wi.component, "priority": wi.priority,
         })
         logger.info("Work item %s opened for %s", wi.id, component)
+    elif wi is not None:
+        # The cached detail (signal_count, last_signal_at) is stale now.
+        # ponytail: list rows' signal_count may lag up to the 30 s list TTL (the UI does not show it);
+        # bumping the list generation per signal would empty the list cache during every burst.
+        await cache.delete_val(f"wi:{wi.id}")
+
+    if wi is not None:
+        await manager.broadcast({"event": "signal_ingested", "id": wi.id, "component": component})
 
     wi_id = wi.id if wi is not None else None
     await append_signal({**record, "work_item_id": wi_id})

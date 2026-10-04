@@ -264,4 +264,43 @@ async def test_created_event_is_broadcast_after_commit():
     with patch("app.services.ingestion.manager.broadcast", side_effect=spy):
         await process_signal(sig("RDBMS_PRIMARY"))
 
-    assert seen == [1]
+    assert seen == [1, 1]  # work_item_created, then signal_ingested: both after the commit
+
+
+# -- B-32: the signal is announced once it is saved, and the detail cache follows it ------------
+
+async def test_detail_cache_is_dropped_when_a_signal_joins_an_existing_incident(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    assert (await client.get(f"/api/work-items/{wi_id}", headers=headers)).json()["signal_count"] == 1  # primes the cache
+
+    await process_signal(sig())
+
+    assert (await client.get(f"/api/work-items/{wi_id}", headers=headers)).json()["signal_count"] == 2
+
+
+async def test_each_saved_signal_is_broadcast_with_its_incident_id():
+    wi_id = await process_signal(sig("RDBMS_PRIMARY"))
+    with patch("app.services.ingestion.manager.broadcast", new_callable=AsyncMock) as broadcast:
+        await process_signal(sig("RDBMS_PRIMARY"))
+
+    broadcast.assert_awaited_once_with({"event": "signal_ingested", "id": wi_id, "component": "RDBMS_PRIMARY"})
+
+
+async def test_posting_a_signal_does_not_broadcast_before_it_is_saved(client, make_headers):
+    with patch("app.services.ws_manager.manager.broadcast", new_callable=AsyncMock) as broadcast:
+        r = await client.post("/api/signals", json={"component_id": "CACHE_Q", "signal_type": "ERROR", "message": "x"},
+                              headers=await make_headers("sre"))
+
+    assert r.status_code == 202
+    broadcast.assert_not_awaited()
+
+
+async def test_batch_signals_carry_the_source_ip(client, make_headers):
+    with patch("app.routers.signals.ingestion.enqueue_signal", new_callable=AsyncMock, return_value=True) as enqueue:
+        r = await client.post("/api/signals/batch",
+                              json=[{"component_id": "CACHE_Q", "signal_type": "ERROR", "message": "x"}],
+                              headers=await make_headers("sre"))
+
+    assert r.status_code == 202
+    assert enqueue.call_args.args[0]["source_ip"]

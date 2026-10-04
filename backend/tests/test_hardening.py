@@ -70,6 +70,36 @@ async def test_assigning_unknown_user_is_422_not_500(client, make_headers):
 
 @db_test[0]
 @db_test[1]
+@pytest.mark.parametrize("role,active", [("viewer", True), ("sre", False)])
+async def test_assignee_must_be_an_active_sre_or_admin(client, make_headers, make_user, role, active):
+    """B-35: the API accepted viewers and deactivated accounts; only the UI hid them."""
+    from sqlalchemy import update
+    from app.db.postgres import AsyncSessionLocal, User
+
+    headers = await make_headers("sre")
+    target = await make_user(role)
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(User).where(User.id == target["id"]).values(is_active=active))
+        await db.commit()
+    wi_id = await process_signal({"component_id": "CACHE_ASSIGN", "signal_type": "ERROR", "message": "x"})
+
+    r = await client.patch(f"/api/work-items/{wi_id}/assign", json={"assignee_id": target["id"]}, headers=headers)
+
+    assert r.status_code == 422
+    assert "active SRE or admin" in r.json()["detail"]
+
+
+@db_test[0]
+@db_test[1]
+@pytest.mark.parametrize("limit", [-1, 0, 100000])
+async def test_timeseries_limit_is_bounded(client, make_headers, limit):
+    """B-36: limit=-1 reached Postgres as LIMIT -1 and came back as a 500."""
+    r = await client.get("/api/timeseries", params={"limit": limit}, headers=await make_headers("sre"))
+    assert r.status_code == 422
+
+
+@db_test[0]
+@db_test[1]
 @pytest.mark.parametrize("override", [
     {"component_id": "../../etc/passwd"},
     {"component_id": "A" * 65},
@@ -131,3 +161,30 @@ def test_throughput_line_is_silent_when_idle_and_names_the_process():
     assert f"pid={os.getpid()}" in line
     assert "20.0 sig/sec" in line
     assert _throughput_line(0, 5.0, 7, 50_000) is not None  # idle workers with a backlog still report
+
+
+@db_test[0]
+@db_test[1]
+@pytest.mark.parametrize("length,status", [(4000, 201), (4001, 422)])
+async def test_comment_body_is_bounded(client, make_headers, length, status):
+    """Harden: a comment body had no upper bound, so one request could store megabytes."""
+    headers = await make_headers("sre")
+    wi_id = await process_signal({"component_id": "CACHE_BOUND", "signal_type": "ERROR", "message": "x"})
+    r = await client.post(f"/api/work-items/{wi_id}/comments", json={"body": "x" * length}, headers=headers)
+    assert r.status_code == status
+
+
+@db_test[0]
+@db_test[1]
+@pytest.mark.parametrize("field", ["fix_applied", "prevention_steps"])
+async def test_rca_free_text_is_bounded(client, make_headers, field):
+    """Harden: RCA free text had no upper bound."""
+    headers = await make_headers("sre")
+    wi_id = await process_signal({"component_id": "CACHE_BOUND", "signal_type": "ERROR", "message": "x"})
+    rca = {
+        "incident_start": "2026-01-01T10:00:00Z", "incident_end": "2026-01-01T12:00:00Z",
+        "root_cause_category": "Infrastructure Failure", "fix_applied": "ok", "prevention_steps": "ok",
+    }
+    r = await client.post(f"/api/work-items/{wi_id}/rca", json={**rca, field: "x" * 8001}, headers=headers)
+    assert r.status_code == 422
+    assert "8000" in r.text

@@ -11,6 +11,12 @@ PAGE_AND_SLACK = ("pagerduty", "slack")
 SLACK_ONLY = ("slack",)
 
 
+def channels_for_priority(priority: str) -> tuple[str, ...]:
+    """Channels for a stored priority: every strategy pairs P0/P1 with paging and P2/P3 with Slack only.
+    Used for status changes, where the work item has a priority but not the signal's component_type."""
+    return PAGE_AND_SLACK if priority in ("P0", "P1") else SLACK_ONLY
+
+
 class AlertStrategy(ABC):
     channels: tuple[str, ...] = SLACK_ONLY
 

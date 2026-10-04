@@ -112,6 +112,7 @@ class WorkItemResponse(BaseModel):
     assignee_username: Optional[str] = None
     start_time: datetime
     end_time: Optional[datetime]
+    resolved_at: Optional[datetime] = None
     mttr_seconds: Optional[int]
     sla_deadline: Optional[datetime]
     sla_breached: bool = False
@@ -159,7 +160,10 @@ class RCASubmit(BaseModel):
     def non_empty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("Field cannot be blank")
-        return v.strip()
+        v = v.strip()
+        if len(v) > 8000:
+            raise ValueError("Field must be at most 8000 characters")
+        return v
 
 class RCAResponse(BaseModel):
     id: str
@@ -182,7 +186,10 @@ class CommentCreate(BaseModel):
     def non_empty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("Comment cannot be blank")
-        return v.strip()
+        v = v.strip()
+        if len(v) > 4000:
+            raise ValueError("Comment must be at most 4000 characters")
+        return v
 
 class CommentResponse(BaseModel):
     id: str

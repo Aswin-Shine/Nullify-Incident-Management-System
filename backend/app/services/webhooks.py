@@ -1,15 +1,27 @@
 """Webhook notifications: Slack + PagerDuty."""
 from __future__ import annotations
+import asyncio
 import logging
 import httpx
 from app.core.config import get_settings
-from app.services.alert_strategy import get_alert_strategy
+from app.services.alert_strategy import channels_for_priority, get_alert_strategy
 
 logger = logging.getLogger("ims.webhooks")
 settings = get_settings()
 
 PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
 PAGERDUTY_SEVERITY = {"P0": "critical", "P1": "error", "P2": "warning", "P3": "info"}
+
+
+_background: set[asyncio.Task] = set()
+
+
+def spawn(coro) -> asyncio.Task:
+    """Run a notification in the background. The loop holds tasks weakly, so keep one until it is done."""
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
 
 
 def _channels(work_item: dict) -> tuple[str, ...]:
@@ -26,7 +38,8 @@ async def notify_incident_created(work_item: dict):
 
 
 async def notify_status_change(work_item: dict, new_status: str):
-    channels = _channels(work_item)
+    # The stored priority decides, not the name: the incident may have been created from a component_type.
+    channels = channels_for_priority(work_item.get("priority", "P3"))
     if "slack" in channels:
         await _slack_notify(work_item, event="status_change", extra={"new_status": new_status})
     if new_status == "RESOLVED" and "pagerduty" in channels:

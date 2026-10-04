@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/work-items", tags=["work-items"])
 
 @router.get("")
 async def list_work_items(
-    status: str | None = None,
+    status: str | None = Query(None, pattern="^(OPEN|INVESTIGATING|RESOLVED|CLOSED|ACTIVE)$"),
     limit: int = 100,
     cursor: str | None = None,
     q: str | None = Query(None, max_length=64),
@@ -104,7 +104,7 @@ async def update_status(
     # The service has committed, so listeners never see a change that could still roll back.
     data = updated.model_dump(mode="json")
     await manager.broadcast({"event": "work_item_updated", "id": wi_id, "status": body.new_status})
-    await webhooks.notify_status_change(data, body.new_status)
+    webhooks.spawn(webhooks.notify_status_change(data, body.new_status))  # Slack/PagerDuty must not hold up the response
     return data
 
 

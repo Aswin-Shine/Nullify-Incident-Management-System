@@ -64,7 +64,11 @@ async def test_status_change_records_from_to_and_the_actor(client, make_user):
     r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers)
 
     assert r.status_code == 200
-    assert (await events(wi_id))[1:] == [("status", user["id"], "OPEN", "INVESTIGATING")]
+    # Starting the investigation also claims the unowned incident, in the same transaction.
+    assert (await events(wi_id))[1:] == [
+        ("status", user["id"], "OPEN", "INVESTIGATING"),
+        ("assigned", user["id"], None, user["username"]),
+    ]
 
 
 async def test_a_lost_race_records_no_status_event(client, make_user):
@@ -133,6 +137,7 @@ async def test_history_endpoint_lists_events_oldest_first_with_actor_username(cl
     assert [(e["kind"], e["from_value"], e["to_value"], e["actor_username"]) for e in body] == [
         ("created", None, "P0", None),
         ("status", "OPEN", "INVESTIGATING", user["username"]),
+        ("assigned", None, user["username"], user["username"]),
         ("status", "INVESTIGATING", "RESOLVED", user["username"]),
     ]
     assert all(e["id"] and e["created_at"] for e in body)
