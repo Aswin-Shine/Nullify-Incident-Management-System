@@ -1,0 +1,75 @@
+# Alert rules. They show in Prometheus (/alerts) and in Grafana's alert list; nothing is sent anywhere yet.
+# Add Alertmanager (and a receiver) to page someone; these rules need no change for that.
+groups:
+  - name: nullify-availability
+    rules:
+      - alert: NullifyApiDown
+        expr: up{job="nullify-backend"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: The Nullify API is not answering scrapes
+          description: Prometheus cannot reach backend:8000/metrics. Signals are not being accepted.
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Postgres is unreachable
+          description: The exporter cannot connect to Postgres. Signal persistence fails and goes to the lake only.
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Redis is unreachable
+          description: Cache, rate limits (they fail open) and live updates across workers are down.
+
+  - name: nullify-ingestion
+    rules:
+      - alert: IngestQueueFilling
+        expr: max(nullify_ingest_queue_depth) / max(nullify_ingest_queue_capacity) > 0.8
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: An ingest queue is over 80% full
+          description: "The fullest worker queue is at {{ $value | humanizePercentage }}. Signals start getting 429 at 100%."
+      - alert: SignalsDropped
+        expr: sum(increase(nullify_signals_rejected_total[5m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Signals were turned away (429)
+          description: "{{ $value | humanize }} signals were rejected in the last 5 minutes because a queue was full."
+      - alert: SignalProcessingFailing
+        expr: sum(increase(nullify_signals_processed_total{outcome="failed"}[5m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Signals are failing to persist
+          description: "{{ $value | humanize }} signals in the last 5 minutes reached only the lake, not Postgres."
+      - alert: DbRetriesSpiking
+        expr: sum(rate(nullify_db_retries_total[5m])) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Database writes keep retrying
+          description: More than one transient DB error per second for 5 minutes.
+
+  - name: nullify-http
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="nullify-backend", status="5xx"}[5m]))
+            / sum(rate(http_requests_total{job="nullify-backend"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 5% of API requests fail
+          description: "{{ $value | humanizePercentage }} of requests returned 5xx over 5 minutes."
+      - alert: SlowRequests
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="nullify-backend"}[5m]))) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: API requests are slow
+          description: "p95 latency is {{ $value | humanizeDuration }} (over 1 s for 10 minutes)."

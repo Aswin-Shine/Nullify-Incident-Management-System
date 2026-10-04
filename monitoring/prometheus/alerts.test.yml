@@ -1,0 +1,85 @@
+# Unit tests for alerts.yml: docker run --rm -v "$PWD:/t" --entrypoint promtool prom/prometheus:v3.5.0 test rules /t/alerts.test.yml
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+
+tests:
+  - name: the API alert waits a minute, then fires
+    interval: 15s
+    input_series:
+      - series: 'up{job="nullify-backend", instance="backend:8000"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: NullifyApiDown
+        exp_alerts: []
+      - eval_time: 105s
+        alertname: NullifyApiDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: nullify-backend, instance: "backend:8000" }
+            exp_annotations:
+              summary: The Nullify API is not answering scrapes
+              description: Prometheus cannot reach backend:8000/metrics. Signals are not being accepted.
+
+  - name: a 429 fires SignalsDropped at once, and quiet counters do not
+    interval: 1m
+    input_series:
+      - series: 'nullify_signals_rejected_total{reason="queue_full"}'
+        values: '0 0 0 3 3'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SignalsDropped
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SignalsDropped
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Signals were turned away (429)
+              description: "3 signals were rejected in the last 5 minutes because a queue was full."
+
+  - name: the fullest queue over 80% for 2 minutes fires IngestQueueFilling
+    interval: 1m
+    input_series:
+      - series: 'nullify_ingest_queue_depth'
+        values: '100 45000 45000 45000 45000'
+      - series: 'nullify_ingest_queue_capacity'
+        values: '50000x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: IngestQueueFilling
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: IngestQueueFilling
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: An ingest queue is over 80% full
+              description: "The fullest worker queue is at 90%. Signals start getting 429 at 100%."
+
+  - name: 10% of requests failing for 5 minutes fires HighErrorRate; 1% does not
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="nullify-backend", status="2xx"}'
+        values: '0+90x12'
+      - series: 'http_requests_total{job="nullify-backend", status="5xx"}'
+        values: '0+10x12'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: More than 5% of API requests fail
+              description: "10% of requests returned 5xx over 5 minutes."
+  - name: low error rate stays quiet
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="nullify-backend", status="2xx"}'
+        values: '0+99x12'
+      - series: 'http_requests_total{job="nullify-backend", status="5xx"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighErrorRate
+        exp_alerts: []
