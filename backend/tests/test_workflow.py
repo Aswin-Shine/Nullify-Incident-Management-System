@@ -88,7 +88,7 @@ async def test_status_transitions_do_not_set_mttr(client, make_headers):
     wi_id = await process_signal(sig())
 
     for status in ("INVESTIGATING", "RESOLVED"):
-        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status}, headers=headers)
+        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status, "note": "Failed over"}, headers=headers)
         assert r.status_code == 200
 
     assert r.json()["end_time"] is None
@@ -524,7 +524,7 @@ async def test_resolving_an_unassigned_incident_does_not_assign_it(client, make_
     wi_id = await process_signal(sig())
     await set_status(wi_id, "INVESTIGATING")
 
-    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED"}, headers=headers)
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED", "note": "Failed over"}, headers=headers)
 
     assert r.status_code == 200
     assert r.json()["assignee_id"] is None
@@ -540,7 +540,7 @@ async def test_resolving_records_resolved_at_and_closing_keeps_it(client, make_h
     assert r.json()["resolved_at"] is None
 
     before = datetime.now(timezone.utc)
-    r = await client.patch(url, json={"new_status": "RESOLVED"}, headers=headers)
+    r = await client.patch(url, json={"new_status": "RESOLVED", "note": "Failed over"}, headers=headers)
     resolved_at = datetime.fromisoformat(r.json()["resolved_at"])
     assert resolved_at >= before - timedelta(seconds=1)
     assert await committed(WorkItem.resolved_at, wi_id) == resolved_at
@@ -551,3 +551,64 @@ async def test_resolving_records_resolved_at_and_closing_keeps_it(client, make_h
     assert (await client.post(f"/api/work-items/{wi_id}/rca", json=RCA, headers=headers)).status_code == 200
     r = await client.patch(url, json={"new_status": "CLOSED"}, headers=headers)
     assert datetime.fromisoformat(r.json()["resolved_at"]) == resolved_at
+
+
+async def test_resolving_needs_a_note_and_a_missing_or_blank_one_changes_nothing(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    await set_status(wi_id, "INVESTIGATING")
+    url = f"/api/work-items/{wi_id}/status"
+
+    for body in ({"new_status": "RESOLVED"}, {"new_status": "RESOLVED", "note": "   "}):
+        r = await client.patch(url, json=body, headers=headers)
+        assert r.status_code == 422
+        assert "resolution note" in r.json()["detail"]
+
+    assert await committed(WorkItem.status, wi_id) == "INVESTIGATING"
+    assert [k for k, _ in await history_kinds(client, headers, wi_id)] == ["created"]
+
+
+async def test_resolution_note_is_stored_trimmed_and_returned_by_reads(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    await set_status(wi_id, "INVESTIGATING")
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status",
+                           json={"new_status": "RESOLVED", "note": "  Restarted the primary, replica caught up  "}, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["resolution_note"] == "Restarted the primary, replica caught up"
+    got = (await client.get(f"/api/work-items/{wi_id}", headers=headers)).json()
+    assert got["resolution_note"] == "Restarted the primary, replica caught up"
+    listed = (await client.get("/api/work-items", params={"status": "RESOLVED"}, headers=headers)).json()["items"]
+    assert listed[0]["resolution_note"] == "Restarted the primary, replica caught up"
+
+
+async def test_a_resolution_note_over_4000_characters_is_refused(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+    await set_status(wi_id, "INVESTIGATING")
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED", "note": "x" * 4001}, headers=headers)
+
+    assert r.status_code == 422
+    assert await committed(WorkItem.status, wi_id) == "INVESTIGATING"
+
+
+async def test_an_invalid_move_without_a_note_is_still_a_400(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())  # OPEN: RESOLVED is not a next state
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED"}, headers=headers)
+
+    assert r.status_code == 400
+
+
+async def test_a_note_sent_with_another_status_is_ignored(client, make_headers):
+    headers = await make_headers("sre")
+    wi_id = await process_signal(sig())
+
+    r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING", "note": "looking"}, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["resolution_note"] is None

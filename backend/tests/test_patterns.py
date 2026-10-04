@@ -43,7 +43,7 @@ async def test_close_without_rca_returns_the_states_own_guard_message(client, ma
     wi_id = await process_signal(
         {"component_id": "RDBMS_PRIMARY", "signal_type": "ERROR", "message": "down", "metadata": {}})
     for status in ("INVESTIGATING", "RESOLVED"):
-        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status}, headers=headers)
+        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status, "note": "Failed over"}, headers=headers)
         assert r.status_code == 200
 
     r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "CLOSED"}, headers=headers)

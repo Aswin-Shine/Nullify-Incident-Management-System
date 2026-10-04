@@ -13,6 +13,7 @@ from sqlalchemy import and_, or_, select, func, tuple_, update, literal_column, 
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import selectinload
 
+from app.core.metrics import TRANSITIONS
 from app.db.postgres import ACTIVE_WHERE, WorkItem, WorkItemEvent, RCARecord, Comment, Signal, User
 from app.db import cache
 from app.models.schemas import (
@@ -61,6 +62,7 @@ def _wi_to_response(wi: WorkItem) -> WorkItemResponse:
         start_time=wi.start_time,
         end_time=wi.end_time,
         resolved_at=wi.resolved_at,
+        resolution_note=wi.resolution_note,
         mttr_seconds=wi.mttr_seconds,
         sla_deadline=wi.sla_deadline,
         sla_breached=sla_breached,
@@ -254,13 +256,14 @@ async def _load_response(wi_id: str, db: AsyncSession) -> WorkItemResponse:
 
 
 async def transition_status(
-    wi_id: str, new_status: str, db: AsyncSession, actor_id: str | None = None
+    wi_id: str, new_status: str, db: AsyncSession, actor_id: str | None = None, note: str | None = None
 ) -> WorkItemResponse:
     """Move a Work Item through the state machine with a compare-and-set UPDATE.
 
     The write applies only if the status is still the one we validated against (and, for CLOSED,
     an RCA exists), so concurrent requests cannot both win. Starting an investigation also claims an
-    unowned incident for the actor (an existing owner is kept). Commits before any side effect.
+    unowned incident for the actor (an existing owner is kept). RESOLVED needs `note` (how it was fixed),
+    stored by the same UPDATE. Commits before any side effect.
     """
     row = (await db.execute(select(WorkItem.status, WorkItem.assignee_id).where(WorkItem.id == wi_id))).one_or_none()
     if row is None:
@@ -268,11 +271,14 @@ async def transition_status(
     current, owner_before = row
 
     target = get_state(current).transition_to(new_status)
+    if new_status == "RESOLVED" and not note:
+        raise ValueError("A resolution note is required: say how it was fixed.")
 
     conditions = [WorkItem.id == wi_id, WorkItem.status == current, *target.entry_conditions(wi_id)]
     values = {"status": new_status, "updated_at": _now()}
     if new_status == "RESOLVED":
         values["resolved_at"] = values["updated_at"]
+        values["resolution_note"] = note
     if new_status == "INVESTIGATING" and actor_id:
         values["assignee_id"] = func.coalesce(WorkItem.assignee_id, actor_id)
     updated = (await db.execute(
@@ -290,6 +296,7 @@ async def transition_status(
         claimer = await db.get(User, actor_id)
         record_event(db, wi_id, "assigned", actor_id, None, claimer.username if claimer else None)
     await db.commit()
+    TRANSITIONS.labels(to=new_status).inc()
     await invalidate_cache(wi_id)
     return await _load_response(wi_id, db)
 
@@ -502,6 +509,14 @@ async def get_sla_stats(db: AsyncSession) -> SLAStats:
         breach_rate_pct=round(breached / total * 100, 1) if total else 0.0,
         open_by_priority=open_by_priority,
     )
+
+
+async def open_counts_by_priority(db: AsyncSession) -> dict[str, int]:
+    """OPEN and INVESTIGATING incidents per priority (priorities with none are absent)."""
+    rows = await db.execute(
+        select(WorkItem.priority, func.count()).where(WorkItem.status.in_(["OPEN", "INVESTIGATING"])).group_by(WorkItem.priority)
+    )
+    return dict(rows.all())
 
 
 async def unassign_from_active(db: AsyncSession, user: User, actor_id: str) -> list[str]:

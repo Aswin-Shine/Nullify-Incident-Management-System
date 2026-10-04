@@ -93,7 +93,7 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        updated = await work_item_service.transition_status(wi_id, body.new_status, db, user.id)
+        updated = await work_item_service.transition_status(wi_id, body.new_status, db, user.id, body.note)
     except InvalidTransitionError as e:
         raise HTTPException(400, str(e))
     except ConflictError as e:

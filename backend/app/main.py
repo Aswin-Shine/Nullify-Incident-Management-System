@@ -1,8 +1,10 @@
 """Nullify — Incident Management Platform. Production entry point."""
 from __future__ import annotations
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.cache import init_redis, close_redis
@@ -24,8 +26,10 @@ async def lifespan(app: FastAPI):
     await init_redis()  # schema is owned by Alembic: run `alembic upgrade head` before starting
     await manager.start()  # cross-worker live updates over Redis pub/sub
     await start_ingestion_workers()
+    gauges = asyncio.create_task(metrics.refresh_loop())  # the open-incident gauge, every 30 s
     logger.info("Nullify ready")
     yield
+    gauges.cancel()
     logger.info("Shutting down Nullify: draining ingestion queue")
     await stop_ingestion_workers(settings.shutdown_drain_seconds)
     await manager.stop()

@@ -128,7 +128,7 @@ async def test_history_endpoint_lists_events_oldest_first_with_actor_username(cl
     user, headers = await sre(make_user)
     wi_id = await process_signal(sig())
     await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers)
-    await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED"}, headers=headers)
+    await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "RESOLVED", "note": "Failed over"}, headers=headers)
 
     r = await client.get(f"/api/work-items/{wi_id}/history", headers=headers)
 

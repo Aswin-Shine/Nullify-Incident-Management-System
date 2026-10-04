@@ -10,6 +10,8 @@ from typing import Awaitable, Callable, TypeVar
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
+from app.core.metrics import DB_RETRIES
+
 logger = logging.getLogger("ims.retry")
 T = TypeVar("T")
 
@@ -42,5 +44,6 @@ async def with_db_retry(fn: Callable[[], Awaitable[T]], *, attempts: int, base_d
             delay = base_delay * 2 ** (attempt - 1) + random.uniform(0, base_delay / 2)
             logger.warning("Transient DB error (attempt %d/%d), retrying in %.2fs: %s",
                            attempt, attempts, delay, exc)
+            DB_RETRIES.inc()
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")

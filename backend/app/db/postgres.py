@@ -60,6 +60,7 @@ class WorkItem(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # RCA submission
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[str | None] = mapped_column(Text)  # required when marked RESOLVED
     mttr_seconds: Mapped[int | None] = mapped_column(Integer)
     sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     signal_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

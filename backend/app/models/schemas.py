@@ -113,6 +113,7 @@ class WorkItemResponse(BaseModel):
     start_time: datetime
     end_time: Optional[datetime]
     resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
     mttr_seconds: Optional[int]
     sla_deadline: Optional[datetime]
     sla_breached: bool = False
@@ -123,6 +124,15 @@ class WorkItemResponse(BaseModel):
 
 class StatusTransition(BaseModel):
     new_status: Status
+    note: Optional[str] = None  # how it was fixed; required for RESOLVED, ignored otherwise
+
+    @field_validator("note")
+    @classmethod
+    def trim_note(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip()
+        if len(v) > 4000:
+            raise ValueError("Resolution note must be at most 4000 characters")
+        return v or None
 
 class AssignRequest(BaseModel):
     assignee_id: Optional[str] = None  # None = unassign

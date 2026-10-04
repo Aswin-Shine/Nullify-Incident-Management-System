@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from app.core.metrics import WS_CONNECTIONS
 from app.core.config import get_settings
 from app.db import cache
 
@@ -39,10 +40,12 @@ class ConnectionManager:
         """Add an accepted, authenticated socket to the broadcast list."""
         async with self._lock:
             self._connections.append(ws)
+            WS_CONNECTIONS.set(len(self._connections))
 
     async def disconnect(self, ws: WebSocket):
         async with self._lock:
             self._connections = [c for c in self._connections if c is not ws]
+            WS_CONNECTIONS.set(len(self._connections))
 
     async def start(self):
         """Subscribe to the fan-out channel and deliver what arrives to this process's sockets."""

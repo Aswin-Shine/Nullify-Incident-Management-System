@@ -25,7 +25,7 @@ async def new_work_item(component: str, priority: str = "P2") -> str:
 
 async def move(client, headers, wi_id, *statuses):
     for status in statuses:
-        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status}, headers=headers)
+        r = await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": status, "note": "Failed over"}, headers=headers)
         assert r.status_code == 200, r.text
 
 

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.db import cache
 from app.db.nosql import append_signal
@@ -42,10 +43,13 @@ def accepting() -> bool:
 async def enqueue_signal(signal: dict) -> bool:
     try:
         _queue.put_nowait(signal)
-        return True
     except asyncio.QueueFull:
+        metrics.SIGNALS_REJECTED.labels(reason="queue_full").inc()
         logger.warning("Queue full, signal rejected for %s", signal.get("component_id"))
         return False
+    metrics.SIGNALS_RECEIVED.inc()
+    metrics.QUEUE_DEPTH.set(_queue.qsize())
+    return True
 
 
 def _occurred_at(raw, received: datetime) -> datetime:
@@ -91,6 +95,7 @@ async def process_signal(signal: dict) -> str | None:
 
     Never raises for DB failures: the raw signal still reaches the lake with work_item_id=None.
     """
+    started = time.perf_counter()
     received = datetime.now(timezone.utc)
     occurred = _occurred_at(signal.get("timestamp"), received)
     component = signal.get("component_id") or "UNKNOWN"
@@ -107,7 +112,9 @@ async def process_signal(signal: dict) -> str | None:
         logger.exception("Signal persistence failed for %s", component)
         wi = None
 
+    metrics.SIGNALS_PROCESSED.labels(outcome="ok" if wi is not None else "failed").inc()
     if wi is not None and wi.created:
+        metrics.INCIDENTS_CREATED.labels(priority=wi.priority).inc()
         # Side effects only after commit: the dashboard must see the new incident, and page once.
         await invalidate_cache()
         webhooks.spawn(webhooks.notify_incident_created({
@@ -129,6 +136,7 @@ async def process_signal(signal: dict) -> str | None:
 
     wi_id = wi.id if wi is not None else None
     await append_signal({**record, "work_item_id": wi_id})
+    metrics.SIGNAL_PROCESSING.observe(time.perf_counter() - started)
     return wi_id
 
 
@@ -143,6 +151,7 @@ async def _worker():
     global _processed_count
     while True:
         signal = await _queue.get()
+        metrics.QUEUE_DEPTH.set(_queue.qsize())
         try:
             await process_signal(signal)
             _processed_count += 1
@@ -179,6 +188,7 @@ async def _metrics_printer():
 async def start_ingestion_workers(num_workers: int | None = None):
     global _accepting
     _accepting = True
+    metrics.QUEUE_CAPACITY.set(_queue.maxsize)
     n = num_workers or settings.ingestion_workers
     _tasks.extend(asyncio.create_task(_worker()) for _ in range(n))
     _tasks.append(asyncio.create_task(_metrics_printer()))
