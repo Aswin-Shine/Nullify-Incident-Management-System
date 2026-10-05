@@ -34,7 +34,6 @@ LABEL org.opencontainers.image.description="Nullify IMS — FastAPI backend"
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         libpq5 \
-        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user — never run as root in production
@@ -64,13 +63,16 @@ EXPOSE 8000
 
 # Healthcheck — hits /health endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health/live || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=4)" || exit 1
 
-# Entrypoint — 4 workers, no reload in production
+# 4 workers, no reload in production. Trusting X-Forwarded-For from any peer is safe only because the backend
+# publishes no port and nginx overwrites the header with the real peer ($remote_addr). The only client message
+# on /ws is the auth token, hence the 64 KB frame cap (default 16 MB).
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--workers", "4", \
      "--proxy-headers", "--forwarded-allow-ips", "*", \
+     "--ws-max-size", "65536", \
      "--log-level", "info", \
      "--no-access-log"]

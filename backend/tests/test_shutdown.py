@@ -1,6 +1,7 @@
 """Graceful shutdown: drain the queue, never silently lose an accepted (202) signal."""
 import asyncio
 import json
+import glob
 import os
 
 import pytest
@@ -20,8 +21,11 @@ def sig(component="CACHE_SHUTDOWN"):
 
 
 def lake_lines(component):
-    with open(os.path.join(get_settings().lake_dir, f"{component}.jsonl")) as f:
-        return [json.loads(line) for line in f.read().splitlines()]
+    lines = []  # the lake keeps one folder per UTC day
+    for path in sorted(glob.glob(os.path.join(get_settings().lake_dir, "*", f"{component}.jsonl"))):
+        with open(path) as f:
+            lines += [json.loads(line) for line in f.read().splitlines()]
+    return lines
 
 
 @pytest.fixture(autouse=True)

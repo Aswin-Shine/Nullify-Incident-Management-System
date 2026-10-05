@@ -46,6 +46,11 @@ async def notify_status_change(work_item: dict, new_status: str):
         await _pagerduty_resolve(work_item)
 
 
+def _slack_escape(value) -> str:
+    """Slack mrkdwn treats <...> as links and mentions; producer text (component, signal type) must stay plain."""
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
     if not settings.slack_webhook_url:
         return
@@ -54,7 +59,7 @@ async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
     wi_id = work_item.get("id", "")[:8]
 
     if event == "created":
-        text = f"{emoji} *New Incident* [{priority}] `{wi_id}` - {work_item.get('title')}"
+        text = f"{emoji} *New Incident* [{priority}] `{wi_id}` - {_slack_escape(work_item.get('title'))}"
         color = "#FF3B3B" if priority == "P0" else "#FF8C00" if priority == "P1" else "#F5C518"
     else:
         new_status = extra.get("new_status", "") if extra else ""
@@ -66,7 +71,7 @@ async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
             "color": color,
             "text": text,
             "fields": [
-                {"title": "Component", "value": work_item.get("component", ""), "short": True},
+                {"title": "Component", "value": _slack_escape(work_item.get("component", "")), "short": True},
                 {"title": "Priority", "value": priority, "short": True},
             ],
             "footer": "Nullify Alert",

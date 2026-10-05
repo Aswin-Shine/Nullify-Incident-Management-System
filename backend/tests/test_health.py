@@ -39,10 +39,11 @@ async def test_healthy_returns_200(client):
     assert r.json()["status"] == "ok"
 
 
-async def test_redis_down_returns_503(client):
+async def test_redis_down_returns_503(client, make_headers):
     """Regression for B-26: /health always said 200."""
+    headers = await make_headers("viewer")  # the detail is for signed-in users; anonymous callers get the status
     with redis_down():
-        r = await client.get("/health")
+        r = await client.get("/health", headers=headers)
 
     assert r.status_code == 503
     assert r.json()["redis"] == "error"
@@ -52,25 +53,27 @@ async def test_postgres_down_returns_503(client, postgres_down):
     r = await client.get("/health")
 
     assert r.status_code == 503
-    assert r.json()["postgres"] == "error"
+    assert r.json() == {"status": "degraded"}  # no DB, so no token check: the detail stays private
 
 
-async def test_saturated_queue_returns_503(client):
+async def test_saturated_queue_returns_503(client, make_headers):
+    headers = await make_headers("viewer")
     nearly_full = asyncio.Queue(maxsize=10)
     for i in range(9):
         nearly_full.put_nowait(i)
 
     with patch("app.routers.health._queue", nearly_full):
-        r = await client.get("/health")
+        r = await client.get("/health", headers=headers)
 
     assert r.status_code == 503
     assert r.json()["queue"] == "saturated"
 
 
-async def test_not_accepting_during_shutdown_returns_503(client, monkeypatch):
+async def test_not_accepting_during_shutdown_returns_503(client, make_headers, monkeypatch):
+    headers = await make_headers("viewer")
     monkeypatch.setattr(ingestion, "_accepting", False)
 
-    r = await client.get("/health")
+    r = await client.get("/health", headers=headers)
 
     assert r.status_code == 503
     assert r.json()["accepting"] is False

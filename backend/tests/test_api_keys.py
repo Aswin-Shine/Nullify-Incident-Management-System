@@ -34,5 +34,5 @@ async def test_rotating_key_revokes_the_old_one(client, make_headers):
     new = (await client.post("/api/auth/api-key", headers=headers)).json()["api_key"]
 
     assert new != old
-    assert (await client.get("/api/auth/me", headers={"X-API-Key": old})).status_code == 401
-    assert (await client.get("/api/auth/me", headers={"X-API-Key": new})).status_code == 200
+    assert (await client.post("/api/signals", json=SIG, headers={"X-API-Key": old})).status_code == 401
+    assert (await client.post("/api/signals", json=SIG, headers={"X-API-Key": new})).status_code == 202

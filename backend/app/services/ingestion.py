@@ -8,18 +8,17 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.db import cache
 from app.db.nosql import append_signal
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg
 from app.db.retry import with_db_retry
 from app.services import webhooks
-from app.services.work_item_service import invalidate_cache, record_event, upsert_active_work_item
+from app.services.work_item_service import forget_detail, invalidate_cache, record_event, upsert_active_work_item
 from app.services.ws_manager import manager
 
 logger = logging.getLogger("ims.ingestion")
@@ -52,8 +51,12 @@ async def enqueue_signal(signal: dict) -> bool:
     return True
 
 
+MAX_BACKDATE = timedelta(hours=24)
+
+
 def _occurred_at(raw, received: datetime) -> datetime:
-    """Producer event time as aware UTC, clamped so producer clock skew can't land in the future."""
+    """Producer event time as aware UTC, clamped to [received - MAX_BACKDATE, received]: skew can't land in the
+    future, and one signal can't drag an incident's start (and so its MTTR and SLA) back by years."""
     if isinstance(raw, str):
         try:
             raw = datetime.fromisoformat(raw)
@@ -63,7 +66,7 @@ def _occurred_at(raw, received: datetime) -> datetime:
         return received
     if raw.tzinfo is None:
         raw = raw.replace(tzinfo=timezone.utc)
-    return min(raw, received)
+    return max(min(raw, received), received - MAX_BACKDATE)
 
 
 async def _persist(component: str, record: dict, occurred: datetime, received: datetime):
@@ -112,6 +115,8 @@ async def process_signal(signal: dict) -> str | None:
         logger.exception("Signal persistence failed for %s", component)
         wi = None
 
+    if wi is not None:
+        signal["_work_item_id"] = wi.id  # committed: a spill after this point still names its incident
     metrics.SIGNALS_PROCESSED.labels(outcome="ok" if wi is not None else "failed").inc()
     if wi is not None and wi.created:
         metrics.INCIDENTS_CREATED.labels(priority=wi.priority).inc()
@@ -129,22 +134,27 @@ async def process_signal(signal: dict) -> str | None:
         # The cached detail (signal_count, last_signal_at) is stale now.
         # ponytail: list rows' signal_count may lag up to the 30 s list TTL (the UI does not show it);
         # bumping the list generation per signal would empty the list cache during every burst.
-        await cache.delete_val(f"wi:{wi.id}")
+        await forget_detail(wi.id)
 
     if wi is not None:
         await manager.broadcast({"event": "signal_ingested", "id": wi.id, "component": component})
 
     wi_id = wi.id if wi is not None else None
+    signal["_in_lake"] = True  # set before the await: a cancel mid-write must not make the worker spill it again
     await append_signal({**record, "work_item_id": wi_id})
     metrics.SIGNAL_PROCESSING.observe(time.perf_counter() - started)
     return wi_id
 
 
 async def _spill(signal: dict):
-    """Write an unprocessed signal straight to the lake audit log (no DB) during shutdown."""
+    """Write a signal the worker could not finish straight to the lake audit log during shutdown: with its incident
+    id when the DB commit already happened, and not at all when its lake line was already being written."""
     global _spilled
+    if signal.get("_in_lake"):
+        return
     _spilled += 1
-    await append_signal({**signal, "work_item_id": None})
+    clean = {k: v for k, v in signal.items() if not k.startswith("_")}
+    await append_signal({**clean, "work_item_id": signal.get("_work_item_id")})
 
 
 async def _worker():

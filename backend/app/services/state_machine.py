@@ -91,7 +91,3 @@ def get_state(status: str) -> WorkItemState:
         raise ValueError(f"Unknown status: {status}")
     return state
 
-
-def validate_transition(current_status: str, new_status: str) -> None:
-    """Raises InvalidTransitionError if transition not allowed."""
-    get_state(current_status).transition_to(new_status)

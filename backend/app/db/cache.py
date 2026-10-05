@@ -15,13 +15,14 @@ async def init_redis():
     settings = get_settings()
     _redis = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True, max_connections=20)
     await _redis.ping()
-    logger.info("Redis connected: %s", settings.redis_url)
+    logger.info("Redis connected: %s:%s/%s", settings.redis_host, settings.redis_port, settings.redis_db)  # the URL has the password
 
 
 async def close_redis():
     global _redis
     if _redis:
         await _redis.aclose()
+        _redis = None
 
 
 def _r() -> aioredis.Redis:
@@ -62,10 +63,19 @@ async def bump(key: str):
         logger.warning("Cache bump failed [%s]: %s", key, e)
 
 
-async def incr(key: str, ttl: int = 60) -> int:
+async def claim(key: str, ttl: int) -> bool:
+    """True for exactly one caller until the key expires (SET NX), across every worker. False if Redis is down."""
+    try:
+        return bool(await _r().set(f"ims:{key}", 1, nx=True, ex=ttl))
+    except Exception as e:
+        logger.warning("Cache claim failed [%s]: %s", key, e)
+        return False
+
+
+async def incr(key: str, ttl: int = 60, amount: int = 1) -> int:
     r = _r()
-    val = await r.incr(f"ims:{key}")
-    if val == 1:
+    val = await r.incr(f"ims:{key}", amount)
+    if val == amount:  # the first increment of this key
         await r.expire(f"ims:{key}", ttl)
     return val
 

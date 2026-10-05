@@ -42,3 +42,6 @@ def setup_logging():
     # Silence noisy libs
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    # httpx logs every request URL at INFO, and the Slack webhook URL is a bearer secret
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

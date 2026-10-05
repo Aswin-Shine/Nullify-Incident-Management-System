@@ -47,6 +47,9 @@ class ConnectionManager:
             self._connections = [c for c in self._connections if c is not ws]
             WS_CONNECTIONS.set(len(self._connections))
 
+    def has(self, ws: WebSocket) -> bool:
+        return any(c is ws for c in self._connections)
+
     async def start(self):
         """Subscribe to the fan-out channel and deliver what arrives to this process's sockets."""
         self._pubsub = cache._r().pubsub()
@@ -99,6 +102,11 @@ class ConnectionManager:
                 await asyncio.wait_for(ws.send_text(payload), SEND_TIMEOUT)
             except Exception:  # includes the timeout: drop sockets that error or stall
                 await self.disconnect(ws)
+                # Close it too, or the browser keeps a socket that never gets another event and never reconnects.
+                try:
+                    await asyncio.wait_for(ws.close(code=1011), SEND_TIMEOUT)
+                except Exception:
+                    pass  # already gone, or stalled for good: the endpoint's recheck ends it
 
         await asyncio.gather(*(send(ws) for ws in conns))
 

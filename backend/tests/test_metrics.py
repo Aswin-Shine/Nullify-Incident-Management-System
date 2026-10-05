@@ -26,7 +26,7 @@ async def test_accepted_signals_are_counted_and_the_queue_depth_follows():
     assert await ingestion.enqueue_signal(sig())
     assert await ingestion.enqueue_signal(sig())
     assert value("nullify_signals_received_total") == before + 2
-    assert value("nullify_ingest_queue_depth") == 2
+    assert value("nullify_ingest_queue_depth") == ingestion._queue.qsize()  # the gauge follows this worker's queue
 
 
 async def test_a_full_queue_counts_the_dropped_signal():
@@ -77,7 +77,7 @@ async def test_transitions_are_counted_by_target_status_and_a_rejected_one_is_no
     closed = value("nullify_incident_transitions_total", to="CLOSED")
 
     assert (await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "INVESTIGATING"}, headers=headers)).status_code == 200
-    assert (await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "CLOSED"}, headers=headers)).status_code in (400, 409, 422)
+    assert (await client.patch(f"/api/work-items/{wi_id}/status", json={"new_status": "CLOSED"}, headers=headers)).status_code == 400  # INVESTIGATING cannot jump to CLOSED
 
     assert value("nullify_incident_transitions_total", to="INVESTIGATING") == before + 1
     assert value("nullify_incident_transitions_total", to="CLOSED") == closed

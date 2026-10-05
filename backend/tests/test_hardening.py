@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
-from app.db.nosql import _path
+from app.db.nosql import _path, _safe
 from app.main import docs_kwargs
 from app.services.ingestion import process_signal
 
@@ -44,8 +44,8 @@ def test_api_docs_are_off_in_production():
 
 def test_lake_filenames_are_allowlisted():
     """S-18: only `/` and `:` were stripped from component ids used as file names."""
-    path = _path("../..\\etc/passwd:x")
-    assert os.path.dirname(path) == get_settings().lake_dir
+    path = _path(_safe("../..\\etc/passwd:x"))
+    assert os.path.dirname(os.path.dirname(path)) == get_settings().lake_dir  # <lake_dir>/<day>/<file>
     assert set(os.path.basename(path)) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-jsonl")
 
 
@@ -143,7 +143,7 @@ async def test_lake_writes_for_different_components_do_not_block_each_other():
     from app.db import nosql
 
     sig = lambda c: {"component_id": c, "signal_type": "ERROR", "message": "x"}  # noqa: E731
-    async with nosql._locks[nosql._path("LAKE_A")]:
+    async with nosql._locks[nosql._safe("LAKE_A")]:
         await asyncio.wait_for(nosql.append_signal(sig("LAKE_B")), 1)  # B is not blocked by A's lock
 
         same = asyncio.create_task(nosql.append_signal(sig("LAKE_A")))

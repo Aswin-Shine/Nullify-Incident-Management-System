@@ -8,7 +8,6 @@ from app.db.postgres import get_db, User
 from app.models.schemas import StatusTransition, RCASubmit, CommentCreate, AssignRequest
 from app.services import work_item_service
 from app.services.state_machine import InvalidTransitionError
-from app.services.work_item_service import ConflictError
 from app.services.ws_manager import manager
 from app.services import webhooks
 
@@ -96,8 +95,6 @@ async def update_status(
         updated = await work_item_service.transition_status(wi_id, body.new_status, db, user.id, body.note)
     except InvalidTransitionError as e:
         raise HTTPException(400, str(e))
-    except ConflictError as e:
-        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -132,8 +129,6 @@ async def submit_rca(
 ):
     try:
         rca = await work_item_service.submit_rca(wi_id, body, db, user.id)
-    except ConflictError as e:
-        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
     await manager.broadcast({"event": "rca_submitted", "id": wi_id})

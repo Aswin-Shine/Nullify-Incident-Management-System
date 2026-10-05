@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
-from typing import Optional, Literal
+from typing import Annotated, Optional, Literal
+from pydantic import AfterValidator
 from datetime import datetime, timezone
 
 Priority = Literal["P0", "P1", "P2", "P3"]
@@ -18,21 +19,28 @@ ROOT_CAUSE_CATEGORIES = [
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+def _bcrypt_sized(v: str) -> str:
+    if len(v.encode()) > 72:
+        raise ValueError("Password must be at most 72 bytes: bcrypt ignores the rest")
+    return v
+
+NewPassword = Annotated[str, Field(min_length=12, max_length=128), AfterValidator(_bcrypt_sized)]
+
 class UserCreate(BaseModel):
     """Admin-only (accounts are invite-only)."""
     username: str = Field(pattern=r"^[A-Za-z0-9_.-]{3,64}$")
     email: EmailStr
-    password: str = Field(min_length=12, max_length=128)
+    password: NewPassword
     role: Role = "viewer"
 
 class UserUpdate(BaseModel):
     role: Optional[Role] = None
     is_active: Optional[bool] = None
-    password: Optional[str] = Field(None, min_length=12, max_length=128)  # admin reset
+    password: Optional[NewPassword] = None  # admin reset
 
 class PasswordChange(BaseModel):
-    current_password: str
-    new_password: str = Field(min_length=12, max_length=128)
+    current_password: str = Field(max_length=128)
+    new_password: NewPassword
 
 class UserResponse(BaseModel):
     id: str
@@ -50,8 +58,9 @@ class UserPublic(BaseModel):
     role: str
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # Bounded so an oversized body is refused before bcrypt runs and before the username is logged.
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=128)
 
 class TokenResponse(BaseModel):
     """The refresh token travels only in the httpOnly cookie, never in a body."""
@@ -94,12 +103,6 @@ class SignalPayload(BaseModel):
         return v
 
 # ── Work Items ────────────────────────────────────────────────────────────
-
-class WorkItemCreate(BaseModel):
-    component: str
-    priority: Priority
-    title: str
-    description: Optional[str] = None
 
 class WorkItemResponse(BaseModel):
     id: str

@@ -99,7 +99,9 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
     user = await _user_from_refresh_cookie(request, db)
     if user is None:
         raise HTTPException(401, "Session expired")
-    return _session(response, user)  # rotates the refresh cookie
+    # A new access token only: the refresh cookie keeps its expiry, so a session ends a fixed time after login
+    # however busy it is. Logout and password change still revoke it early (token_version).
+    return TokenResponse(access_token=create_access_token(_claims(user)), user=_user_resp(user))
 
 
 @router.post("/logout", status_code=204, dependencies=[Depends(require_csrf_header)])
@@ -132,6 +134,7 @@ async def change_password(data: PasswordChange, response: Response,
         raise HTTPException(400, "New password must differ from the current one")
     user.hashed_password = await asyncio.to_thread(hash_password, data.new_password)
     user.token_version += 1  # signs out every other session
+    user.api_key_hash = None  # a key minted from a stolen session must not outlive the recovery
     await db.commit()
     security_log.info("password_changed user=%s", user.username)
     return _session(response, user)  # this session continues on a fresh token and cookie
@@ -179,7 +182,7 @@ async def create_user(data: UserCreate, admin: User = Depends(require_admin), db
 async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(require_admin),
                       db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
-    if user is None:
+    if user is None or user.deleted_at is not None:  # a deleted account stays deleted
         raise HTTPException(404, "User not found")
     if user.id == admin.id and (
         (data.role is not None and data.role != user.role)
@@ -195,9 +198,12 @@ async def update_user(user_id: str, data: UserUpdate, admin: User = Depends(requ
                           admin.username, user.username)
         user.is_active = data.is_active
         user.token_version += 1
+        if not data.is_active:
+            user.api_key_hash = None
     if data.password is not None:
         user.hashed_password = await asyncio.to_thread(hash_password, data.password)
         user.token_version += 1
+        user.api_key_hash = None
         security_log.info("password_reset by=%s user=%s", admin.username, user.username)
     await db.commit()
     return _user_resp(user)

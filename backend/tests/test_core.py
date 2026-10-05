@@ -4,36 +4,36 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 from app.models.schemas import RCASubmit
-from app.services.state_machine import validate_transition, InvalidTransitionError
+from app.services.state_machine import get_state, InvalidTransitionError
 from app.services.alert_strategy import get_alert_strategy
 
 
 # ── State machine ──────────────────────────────────────────────────────────
 
 def test_open_to_investigating():
-    validate_transition("OPEN", "INVESTIGATING")
+    get_state("OPEN").transition_to("INVESTIGATING")
 
 def test_investigating_to_resolved():
-    validate_transition("INVESTIGATING", "RESOLVED")
+    get_state("INVESTIGATING").transition_to("RESOLVED")
 
 def test_resolved_to_closed():
-    validate_transition("RESOLVED", "CLOSED")
+    get_state("RESOLVED").transition_to("CLOSED")
 
 def test_invalid_open_to_closed():
     with pytest.raises(InvalidTransitionError):
-        validate_transition("OPEN", "CLOSED")
+        get_state("OPEN").transition_to("CLOSED")
 
 def test_invalid_open_to_resolved():
     with pytest.raises(InvalidTransitionError):
-        validate_transition("OPEN", "RESOLVED")
+        get_state("OPEN").transition_to("RESOLVED")
 
 def test_invalid_closed_transition():
     with pytest.raises(InvalidTransitionError):
-        validate_transition("CLOSED", "OPEN")
+        get_state("CLOSED").transition_to("OPEN")
 
 def test_invalid_backwards():
     with pytest.raises(InvalidTransitionError):
-        validate_transition("RESOLVED", "OPEN")
+        get_state("RESOLVED").transition_to("OPEN")
 
 # ── RCA validation ─────────────────────────────────────────────────────────
 

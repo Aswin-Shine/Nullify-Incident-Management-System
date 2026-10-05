@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.deps import user_from_access_token
@@ -17,6 +18,17 @@ from app.services.ws_manager import manager
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger("ims.ws_router")
+
+# How often an open socket re-checks its user: a logout, password change, deactivation or delete ends it within this.
+WS_RECHECK_SECONDS = 60
+
+
+async def still_allowed(user_id: str, token_version: int) -> bool:
+    async with AsyncSessionLocal() as db:
+        current = (await db.execute(
+            select(User.token_version).where(User.id == user_id, User.is_active == True)  # noqa: E712
+        )).scalar_one_or_none()
+    return current == token_version
 
 
 async def authenticate_ws(token: str) -> User | None:
@@ -51,11 +63,27 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # ponytail: an open socket outlives its token's expiry or a later logout; re-check on a timer if needed.
-    await manager.register(websocket)
-    await websocket.send_json({"event": "auth_ok"})
+    # The socket outlives its 15-minute token by design; revocation (token_version, deactivation) still ends it.
     try:
+        await manager.register(websocket)
+        await websocket.send_json({"event": "auth_ok"})
+        loop = asyncio.get_running_loop()
+        next_check = loop.time() + WS_RECHECK_SECONDS
         while True:
-            await websocket.receive_text()  # keep alive; clients don't send anything else
+            # The deadline is wall-clock: frames from the client must not postpone the recheck.
+            try:
+                await asyncio.wait_for(websocket.receive_text(), max(0.0, next_check - loop.time()))
+            except asyncio.TimeoutError:
+                pass
+            if loop.time() >= next_check:
+                next_check = loop.time() + WS_RECHECK_SECONDS
+                # A broadcast that stalled already dropped this socket; otherwise ask the DB whether the user still may.
+                if not manager.has(websocket) or not await still_allowed(user.id, user.token_version):
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
     except WebSocketDisconnect:
+        pass
+    except Exception as e:  # the client vanished mid-send, or the recheck could not reach the DB: the browser reconnects
+        logger.info("WebSocket ended: %s", e)
+    finally:
         await manager.disconnect(websocket)

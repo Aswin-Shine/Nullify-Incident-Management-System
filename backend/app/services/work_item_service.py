@@ -5,7 +5,6 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,16 +16,20 @@ from app.core.metrics import TRANSITIONS
 from app.db.postgres import ACTIVE_WHERE, WorkItem, WorkItemEvent, RCARecord, Comment, Signal, User
 from app.db import cache
 from app.models.schemas import (
-    WorkItemCreate, WorkItemResponse, RCASubmit, RCAResponse,
+    WorkItemResponse, RCASubmit, RCAResponse,
     CommentCreate, CommentResponse, MTTRStats, SLAStats, WorkItemEventResponse
 )
 from app.services.alert_strategy import get_alert_strategy
-from app.services.state_machine import get_state, InvalidTransitionError
+from app.services.state_machine import get_state
 
 logger = logging.getLogger("ims.work_item")
 
 class ConflictError(Exception):
     """The Work Item changed underneath this request (maps to HTTP 409)."""
+
+
+class NotFoundError(Exception):
+    """No Work Item with this id (a handler in main.py maps it to HTTP 404)."""
 
 
 # SLA deadlines by priority (minutes to acknowledge)
@@ -84,29 +87,6 @@ def record_event(
     ))
 
 
-async def create_work_item(data: WorkItemCreate, db: AsyncSession) -> str:
-    wi_id = str(uuid.uuid4())
-    now = _now()
-    sla_deadline = now + timedelta(minutes=SLA_MINUTES.get(data.priority, 1440))
-
-    wi = WorkItem(
-        id=wi_id,
-        component=data.component,
-        priority=data.priority,
-        status="OPEN",
-        title=data.title,
-        description=data.description,
-        start_time=now,
-        sla_deadline=sla_deadline,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(wi)
-    await db.flush()
-    await invalidate_cache()
-    return wi_id
-
-
 async def upsert_active_work_item(
     db: AsyncSession, component: str, occurred_at: datetime, signal_type: str, message: str,
     component_type: str | None = None,
@@ -151,8 +131,15 @@ async def list_signals(wi_id: str, db: AsyncSession, limit: int = 200) -> list[d
     return [{**s.payload, "id": s.id, "work_item_id": s.work_item_id} for s in reversed(rows)]
 
 
+def _detail_key(wi_id: str, version) -> str:
+    return f"wi:{wi_id}:v{version or 0}"
+
+
 async def get_work_item(wi_id: str, db: AsyncSession) -> WorkItemResponse | None:
-    cached = await cache.get_val(f"wi:{wi_id}")
+    # The version is read before the DB: a write that commits meanwhile bumps it, so this read's (older) answer lands
+    # on a key nobody asks for again instead of shadowing the write for the TTL.
+    version = await cache.get_val(f"wi:{wi_id}:ver")
+    cached = await cache.get_val(_detail_key(wi_id, version))
     if cached:
         return WorkItemResponse(**cached)
 
@@ -166,7 +153,7 @@ async def get_work_item(wi_id: str, db: AsyncSession) -> WorkItemResponse | None
         return None
 
     resp = _wi_to_response(wi)
-    await cache.set_val(f"wi:{wi_id}", resp.model_dump(mode="json"), ttl=60)
+    await cache.set_val(_detail_key(wi_id, version), resp.model_dump(mode="json"), ttl=60)
     return resp
 
 
@@ -267,7 +254,7 @@ async def transition_status(
     """
     row = (await db.execute(select(WorkItem.status, WorkItem.assignee_id).where(WorkItem.id == wi_id))).one_or_none()
     if row is None:
-        raise ValueError(f"Work item {wi_id} not found")
+        raise NotFoundError("Work item not found")
     current, owner_before = row
 
     target = get_state(current).transition_to(new_status)
@@ -304,21 +291,29 @@ async def transition_status(
 async def assign_work_item(
     wi_id: str, assignee_id: str | None, db: AsyncSession, actor_id: str | None = None
 ) -> WorkItemResponse:
-    result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id))
-    wi = result.scalar_one_or_none()
-    if not wi:
-        raise ValueError(f"Work item {wi_id} not found")
+    """Compare-and-set like transition_status: the owner must still be the one read, or the request lost a race (409)."""
+    row = (await db.execute(select(WorkItem.status, WorkItem.assignee_id).where(WorkItem.id == wi_id))).one_or_none()
+    if row is None:
+        raise NotFoundError("Work item not found")
+    status, seen = row
+    if status == "CLOSED":
+        raise ConflictError("A closed incident's owner is part of its record and cannot change.")
     new_owner = await db.get(User, assignee_id) if assignee_id is not None else None
     if assignee_id is not None and new_owner is None:
         raise ValueError("Assignee not found")  # 422 instead of a foreign-key 500 at commit
     if new_owner is not None and not (new_owner.is_active and new_owner.role in ("sre", "admin")):
         raise ValueError("Assignee must be an active SRE or admin")
-    if wi.assignee_id != assignee_id:
-        old_owner = await db.get(User, wi.assignee_id) if wi.assignee_id else None
+    if seen != assignee_id:
+        changed = (await db.execute(
+            update(WorkItem)
+            .where(WorkItem.id == wi_id, WorkItem.assignee_id.is_not_distinct_from(seen), WorkItem.status != "CLOSED")
+            .values(assignee_id=assignee_id, updated_at=_now()).returning(WorkItem.id)
+        )).one_or_none()
+        if changed is None:
+            raise ConflictError("The incident changed while this request was in flight. Reload and try again.")
+        old_owner = await db.get(User, seen) if seen else None
         record_event(db, wi_id, "assigned", actor_id,
                      old_owner.username if old_owner else None, new_owner.username if new_owner else None)
-    wi.assignee_id = assignee_id
-    wi.updated_at = _now()
     await db.commit()
     await invalidate_cache(wi_id)
     return await _load_response(wi_id, db)
@@ -333,7 +328,7 @@ async def submit_rca(wi_id: str, data: RCASubmit, db: AsyncSession, user_id: str
     result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id).with_for_update())
     wi = result.scalar_one_or_none()
     if not wi:
-        raise ValueError(f"Work item {wi_id} not found")
+        raise NotFoundError("Work item not found")
     if wi.status == "CLOSED":
         raise ConflictError("RCA is locked once the incident is CLOSED.")
     if wi.status == "OPEN":
@@ -404,7 +399,7 @@ async def get_rca(wi_id: str, db: AsyncSession) -> RCAResponse | None:
 async def add_comment(wi_id: str, data: CommentCreate, author_id: str, db: AsyncSession) -> CommentResponse:
     result = await db.execute(select(WorkItem).where(WorkItem.id == wi_id))
     if not result.scalar_one_or_none():
-        raise ValueError(f"Work item {wi_id} not found")
+        raise NotFoundError("Work item not found")
 
     comment = Comment(
         id=str(uuid.uuid4()),
@@ -426,6 +421,8 @@ async def add_comment(wi_id: str, data: CommentCreate, author_id: str, db: Async
 
 
 async def list_comments(wi_id: str, db: AsyncSession) -> list[CommentResponse]:
+    if (await db.execute(select(WorkItem.id).where(WorkItem.id == wi_id))).first() is None:
+        raise NotFoundError("Work item not found")
     result = await db.execute(
         select(Comment).options(selectinload(Comment.author))
         .where(Comment.work_item_id == wi_id)
@@ -488,11 +485,12 @@ async def get_sla_stats(db: AsyncSession) -> SLAStats:
     total = total_r.scalar() or 0
 
     now = _now()
+    # Breached: still open past the deadline, or resolved after it. Resolving late does not undo a breach.
     breached_r = await db.execute(
-        select(func.count(WorkItem.id)).where(
-            WorkItem.sla_deadline < now,
-            WorkItem.status.notin_(["RESOLVED", "CLOSED"]),
-        )
+        select(func.count(WorkItem.id)).where(or_(
+            and_(WorkItem.status.notin_(["RESOLVED", "CLOSED"]), WorkItem.sla_deadline < now),
+            WorkItem.resolved_at > WorkItem.sla_deadline,
+        ))
     )
     breached = breached_r.scalar() or 0
 
@@ -534,5 +532,10 @@ async def unassign_from_active(db: AsyncSession, user: User, actor_id: str) -> l
 async def invalidate_cache(wi_id: str | None = None):
     """Drop cached dashboard reads. Call only after the write has committed."""
     if wi_id:
-        await cache.delete_val(f"wi:{wi_id}")
+        await forget_detail(wi_id)
     await cache.bump("wi:list:gen")
+
+
+async def forget_detail(wi_id: str):
+    """Retire the cached detail of one incident (see get_work_item)."""
+    await cache.bump(f"wi:{wi_id}:ver")

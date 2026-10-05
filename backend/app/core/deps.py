@@ -25,28 +25,45 @@ async def user_from_access_token(token: str, db: AsyncSession) -> User | None:
     return user
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Security(bearer),
-    api_key: str | None = Security(api_key_header),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    if api_key:  # signal producers
-        user = (await db.execute(
-            select(User).where(User.api_key_hash == hash_api_key(api_key), User.is_active == True)  # noqa: E712
-        )).scalar_one_or_none()
-        if user:
-            return user
-
-    if credentials:
-        user = await user_from_access_token(credentials.credentials, db)
-        if user:
-            return user
-
-    raise HTTPException(
+def _unauthorized() -> HTTPException:
+    return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """A signed-in user (Bearer access token). API keys are not accepted here: see `ingest_principal`."""
+    if credentials:
+        user = await user_from_access_token(credentials.credentials, db)
+        if user:
+            return user
+    raise _unauthorized()
+
+
+async def ingest_principal(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer),
+    api_key: str | None = Security(api_key_header),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Who is sending signals: an API key (producers) or a signed-in user. Only SREs and admins may ingest, because
+    a signal can open a P0 and page on-call. This is the only place an API key is accepted."""
+    user = None
+    if api_key:
+        user = (await db.execute(
+            select(User).where(User.api_key_hash == hash_api_key(api_key), User.is_active == True)  # noqa: E712
+        )).scalar_one_or_none()
+    elif credentials:
+        user = await user_from_access_token(credentials.credentials, db)
+    if user is None:
+        raise _unauthorized()
+    if user.role not in ("sre", "admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only SREs and admins can send signals")
+    return user
 
 
 async def get_current_active_user(user: User = Depends(get_current_user)) -> User:
@@ -66,4 +83,3 @@ def require_role(*roles: str):
 # Convenience role guards
 require_admin = require_role("admin")
 require_sre_or_admin = require_role("sre", "admin")
-any_authenticated = get_current_active_user

@@ -2,8 +2,7 @@
 import pytest
 
 from app.db.postgres import AsyncSessionLocal
-from app.models.schemas import WorkItemCreate
-from app.services.work_item_service import create_work_item
+from factories import create_work_item
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
 
@@ -18,7 +17,7 @@ RCA = {
 
 async def new_work_item(component: str, priority: str = "P2") -> str:
     async with AsyncSessionLocal() as db:
-        wi_id = await create_work_item(WorkItemCreate(component=component, priority=priority, title=component), db)
+        wi_id = await create_work_item(db, component=component, priority=priority, title=component)
         await db.commit()
     return wi_id
 
@@ -29,8 +28,8 @@ async def move(client, headers, wi_id, *statuses):
         assert r.status_code == 200, r.text
 
 
-async def test_health_endpoint(client):
-    r = await client.get("/health")
+async def test_health_endpoint(client, make_headers):
+    r = await client.get("/health", headers=await make_headers("viewer"))  # the detail is for signed-in users
     assert r.status_code == 200
     assert "status" in r.json()
     assert "queue_depth" in r.json()

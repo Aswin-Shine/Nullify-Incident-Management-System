@@ -106,6 +106,7 @@ class Signal(Base):
     __tablename__ = "signals"
     __table_args__ = (
         Index("ix_signals_work_item_occurred", "work_item_id", "occurred_at"),
+        Index("ix_signals_received_at", "received_at"),  # retention deletes by age
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -124,6 +125,8 @@ class User(Base):
     __table_args__ = (
         Index("ix_users_email", "email", unique=True),
         Index("ix_users_username", "username", unique=True),
+        Index("ux_users_username_lower", text("lower(username)"), unique=True),  # migration 0008
+        Index("ux_users_email_lower", text("lower(email)"), unique=True),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

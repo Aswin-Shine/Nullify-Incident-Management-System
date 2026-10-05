@@ -8,10 +8,10 @@ from sqlalchemy import func, select, update
 
 from app.core.security import create_access_token
 from app.db.postgres import AsyncSessionLocal, RCARecord, User, WorkItem
-from app.models.schemas import WorkItemCreate
 from app.services.ingestion import process_signal
 from app.services.state_machine import InvalidTransitionError
-from app.services.work_item_service import ConflictError, create_work_item, transition_status
+from app.services.work_item_service import ConflictError, transition_status
+from factories import create_work_item
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
 
@@ -198,10 +198,10 @@ async def test_sla_stats_open_by_priority_excludes_resolved_and_closed(client, m
     headers = await make_headers("sre")
     async with AsyncSessionLocal() as db:
         ids = {
-            "open_p0": await create_work_item(WorkItemCreate(component="A1", priority="P0", title="a"), db),
-            "resolved_p0": await create_work_item(WorkItemCreate(component="A2", priority="P0", title="b"), db),
-            "investigating_p1": await create_work_item(WorkItemCreate(component="A3", priority="P1", title="c"), db),
-            "closed_p2": await create_work_item(WorkItemCreate(component="A4", priority="P2", title="d"), db),
+            "open_p0": await create_work_item(db, component="A1", priority="P0", title="a"),
+            "resolved_p0": await create_work_item(db, component="A2", priority="P0", title="b"),
+            "investigating_p1": await create_work_item(db, component="A3", priority="P1", title="c"),
+            "closed_p2": await create_work_item(db, component="A4", priority="P2", title="d"),
         }
         await db.commit()
     await set_status(ids["resolved_p0"], "RESOLVED")
@@ -221,7 +221,7 @@ async def make_items(priorities):
     ids = []
     async with AsyncSessionLocal() as db:
         for i, p in enumerate(priorities):
-            ids.append(await create_work_item(WorkItemCreate(component=f"C{i}", priority=p, title=f"t{i}"), db))
+            ids.append(await create_work_item(db, component=f"C{i}", priority=p, title=f"t{i}"))
             await db.commit()
     return ids
 
@@ -352,8 +352,7 @@ async def make_named(*specs):
     ids = {}
     async with AsyncSessionLocal() as db:
         for component, priority in specs:
-            ids[component] = await create_work_item(
-                WorkItemCreate(component=component, priority=priority, title=component), db)
+            ids[component] = await create_work_item(db, component=component, priority=priority, title=component)
             await db.commit()
     return ids
 

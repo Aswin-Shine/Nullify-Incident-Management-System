@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Depends
 
-from app.core.rate_limit import ingest_limit
+from app.core.deps import ingest_principal
+from app.core.rate_limit import ingest_limit, spend_ingest
 from app.db.postgres import User
 from app.models.schemas import SignalPayload
 from app.services import ingestion
@@ -40,11 +41,12 @@ async def ingest_signal(
 async def ingest_batch(
     signals: list[SignalPayload],
     request: Request,
-    _: User = Depends(ingest_limit),
+    user: User = Depends(ingest_principal),
 ):
     _require_accepting()
     if len(signals) > 500:
         raise HTTPException(400, "Batch max 500")
+    await spend_ingest(user, len(signals))
 
     source_ip = request.client.host if request.client else "unknown"
     accepted = 0

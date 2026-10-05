@@ -5,6 +5,7 @@ directory. Docker Compose reads the same root .env automatically for ${VAR} subs
 image the file is absent and compose passes the values as env vars instead.
 """
 from pathlib import Path
+from urllib.parse import quote
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
@@ -41,13 +42,17 @@ class Settings(BaseSettings):
     db_password: str = "postgres"
     db_name: str = "ims"
 
+    # Credentials are percent-encoded: a password with @, / or : would otherwise split the URL in the wrong place.
+    def _db_url(self, scheme: str) -> str:
+        return f"{scheme}://{quote(self.db_user, safe='')}:{quote(self.db_password, safe='')}@{self.db_host}:{self.db_port}/{self.db_name}"
+
     @property
     def database_url(self) -> str:
-        return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        return self._db_url("postgresql+asyncpg")
 
     @property
     def database_url_sync(self) -> str:
-        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        return self._db_url("postgresql")
 
     # Connections per process = pool + overflow. Every uvicorn worker has its own pool, so
     # workers x (pool + overflow) must stay under Postgres max_connections (default 100).
@@ -63,7 +68,7 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         if self.redis_password:
-            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+            return f"redis://:{quote(self.redis_password, safe='')}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     # JWT
@@ -73,6 +78,7 @@ class Settings(BaseSettings):
 
     # Data lake (JSONL files)
     lake_dir: str = "data_lake"  # matches the /app/data_lake volume in docker-compose
+    retention_days: int = 30     # raw signals (rows, timeseries, lake days) older than this are deleted daily; 0 keeps all
 
     # Webhooks
     slack_webhook_url: str = ""

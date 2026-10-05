@@ -56,9 +56,8 @@ async def test_access_token_lives_15_minutes(client, make_user):
     assert c["exp"] - c["iat"] == get_settings().jwt_access_token_expire_minutes * 60
 
 
-async def test_refresh_rotates_cookie_and_needs_csrf_header(client, make_user):
+async def test_refresh_issues_an_access_token_and_needs_csrf_header(client, make_user):
     await login(client, await make_user())
-    old_cookie = client.cookies.get("nullify_refresh")
 
     assert (await client.post("/api/auth/refresh")).status_code == 403  # no X-Requested-With
 
@@ -66,7 +65,6 @@ async def test_refresh_rotates_cookie_and_needs_csrf_header(client, make_user):
     assert r.status_code == 200
     new_access = {"Authorization": f"Bearer {r.json()['access_token']}"}
     assert (await client.get("/api/auth/me", headers=new_access)).status_code == 200
-    assert client.cookies.get("nullify_refresh") != old_cookie
 
     client.cookies.clear()
     assert (await client.post("/api/auth/refresh", headers=CSRF)).status_code == 401
