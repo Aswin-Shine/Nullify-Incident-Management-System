@@ -66,7 +66,7 @@ export function RCAForm({ workItem, rca, onSuccess, readOnly = false, defaultOpe
   const endsBeforeFirstSignal = formData.incident_end && workItem.start_time && formData.incident_end < toLocalInput(workItem.start_time);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const set = (key) => (e) => setFormData({ ...formData, [key]: e.target.value });
+  const set = (key) => (e) => { const { value } = e.target; setFormData(f => ({ ...f, [key]: value })); };
 
   const handleSubmit = async (e) => {
     e.preventDefault();

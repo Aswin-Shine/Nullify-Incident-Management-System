@@ -2,7 +2,6 @@
 // so 'system' is resolved here to an explicit light or dark, and watchSystemTheme follows OS changes.
 // main.jsx applies it before the first render (the CSP forbids an inline script in index.html).
 const KEY = 'nullify.theme';
-const ORDER = ['system', 'light', 'dark'];
 
 export function getThemePref() {
   try {
@@ -34,4 +33,3 @@ export function setThemePref(pref) {
   applyTheme(pref);
 }
 
-export const nextTheme = (pref) => ORDER[(ORDER.indexOf(pref) + 1) % ORDER.length];

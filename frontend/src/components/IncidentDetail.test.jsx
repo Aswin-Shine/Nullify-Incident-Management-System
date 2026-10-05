@@ -434,6 +434,16 @@ test('a pending confirm does not follow you to another incident', async () => {
   expect(screen.getByRole('button', { name: 'Close incident…' })).toBeTruthy()
 })
 
+test('the history is fetched once and shared by the summary and the Activity tab', async () => {
+  api.fetchWorkItem.mockResolvedValue(workItem({ status: 'RESOLVED' }))
+  api.fetchHistory.mockResolvedValue([{ id: 'e1', kind: 'status', from_value: 'INVESTIGATING', to_value: 'RESOLVED',
+    actor_username: 'alice', created_at: new Date().toISOString() }])
+  await renderAs('sre', <IncidentDetail id="wi-1" />)
+  expect(await screen.findByText('alice')).toBeTruthy()
+  await settle()
+  expect(api.fetchHistory).toHaveBeenCalledTimes(1)
+})
+
 describe('resolution note', () => {
   const investigating = () => api.fetchWorkItem.mockResolvedValue(workItem({ status: 'INVESTIGATING' }))
   const noteBox = () => screen.getByRole('textbox', { name: 'How was it resolved?' })

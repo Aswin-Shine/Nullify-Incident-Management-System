@@ -52,6 +52,33 @@ test('a failed refresh signals session expiry and rejects', async () => {
   expect(client.getAccessToken()).toBeNull()
 })
 
+test('a refresh refused with 401 ends the session for every caller (the WebSocket too); a network error does not', async () => {
+  const { axios, client } = await signedIn()
+  const expired = vi.fn()
+  client.setOnSessionExpired(expired)
+  const post = vi.spyOn(axios, 'post').mockRejectedValueOnce(Object.assign(new Error('offline'), { response: undefined }))
+  await expect(client.refreshSession()).rejects.toBeTruthy()
+  expect(expired).not.toHaveBeenCalled()
+
+  post.mockRejectedValueOnce(Object.assign(new Error('401'), { response: { status: 401 } }))
+  await expect(client.refreshSession()).rejects.toBeTruthy()
+  expect(expired).toHaveBeenCalledTimes(1)
+  expect(client.getAccessToken()).toBeNull()
+})
+
+test('fetchHealth sends a 401 through refresh and retry, so the health bar gets its detail back', async () => {
+  const { axios, client } = await signedIn()
+  client.api.defaults.adapter = async (config) => {
+    const status = String(config.headers.Authorization) === 'Bearer old' ? 401 : 200
+    const response = { data: status === 200 ? { status: 'ok', queue_depth: 3 } : { detail: 'Session expired' }, status, statusText: '', headers: {}, config }
+    if (!config.validateStatus(status)) throw Object.assign(new Error(String(status)), { config, response })
+    return response
+  }
+  const post = vi.spyOn(axios, 'post').mockResolvedValue({ data: { access_token: 'new' } })
+  expect(await client.fetchHealth()).toEqual({ status: 'ok', queue_depth: 3 })
+  expect(post).toHaveBeenCalledTimes(1)
+})
+
 test('errorMessage turns string, array and missing details into one string', async () => {
   const { client } = await load()
   expect(client.errorMessage({ response: { data: { detail: 'Lost race' } } })).toBe('Lost race')

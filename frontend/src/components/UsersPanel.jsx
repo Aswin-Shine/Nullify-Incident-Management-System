@@ -28,6 +28,7 @@ function ResetPassword({ username, onSave }) {
 // record keeps what the person did, as "Deleted user". `onDelete` resolves true on success.
 function DeleteUser({ username, onDelete }) {
   const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);  // one delete at a time: a double click must not send a second
   const deleteRef = useRef(null);
   const cancelRef = useRef(null);
   const wasConfirming = useRef(false);
@@ -50,7 +51,10 @@ function DeleteUser({ username, onDelete }) {
       <p>Delete {username}? They can't sign in again. Their open incidents become unassigned; their comments stay as "Deleted user".</p>
       <div className="delete-confirm-actions">
         <button type="button" ref={cancelRef} className="btn btn-secondary" onClick={() => setConfirming(false)}>Cancel</button>
-        <button type="button" className="btn btn-danger" onClick={async () => { if (!(await onDelete())) setConfirming(false); }}>
+        <button type="button" className="btn btn-danger" disabled={busy} onClick={async () => {
+          setBusy(true);
+          if (!(await onDelete())) { setBusy(false); setConfirming(false); }  // on success the row goes away
+        }}>
           Delete account
         </button>
       </div>

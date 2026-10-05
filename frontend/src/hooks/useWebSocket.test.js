@@ -52,6 +52,17 @@ test('a 1008 close refreshes the session and then reconnects', async () => {
   expect(sockets).toHaveLength(2)
 })
 
+test('no reconnect when the refresh settles after unmount (a revoked session signs the user out meanwhile)', async () => {
+  let reject
+  vi.mocked(api.refreshSession).mockReturnValue(new Promise((_, r) => { reject = r }))
+  const { unmount } = renderHook(() => useWebSocket(() => {}))
+  act(() => sockets[0].onclose({ code: 1008 }))
+  unmount()
+  reject(new Error('401'))
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(sockets).toHaveLength(1)
+})
+
 test('auth_ok after a reconnect calls onReconnect, the first one does not (F-35)', async () => {
   const onReconnect = vi.fn()
   renderHook(() => useWebSocket(() => {}, onReconnect))

@@ -1,4 +1,4 @@
-import { screen, within, waitFor } from '@testing-library/react'
+import { screen, within, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { UsersPanel } from './UsersPanel'
 import * as api from '../api/client'
@@ -144,6 +144,19 @@ describe('deleting an account', () => {
     expect(api.deleteUser).toHaveBeenCalledWith('u2')
     expect(await screen.findByText('Deleted bob')).toBeTruthy()
     await waitFor(() => expect(screen.queryByText('bob')).toBeNull())
+  })
+
+  test('Delete account is disabled while the request runs, so a double click sends one delete', async () => {
+    let finish
+    api.deleteUser.mockReturnValue(new Promise(r => { finish = r }))
+    await renderAs('admin', <UsersPanel />)
+    await userEvent.click(within(await row('bob')).getByRole('button', { name: 'Delete bob' }))
+    const confirm = within(await row('bob')).getByRole('button', { name: 'Delete account' })
+    await userEvent.click(confirm)
+    expect(confirm.disabled).toBe(true)
+    await userEvent.click(confirm)
+    expect(api.deleteUser).toHaveBeenCalledTimes(1)
+    await act(async () => { finish() })
   })
 
   test('a failed delete shows the error and keeps the row', async () => {

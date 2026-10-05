@@ -1,4 +1,4 @@
-import { getThemePref, setThemePref, applyTheme, nextTheme, watchSystemTheme } from './theme'
+import { getThemePref, setThemePref, applyTheme, watchSystemTheme } from './theme'
 
 // A stand-in for window.matchMedia('(prefers-color-scheme: dark)') that the test can flip.
 function fakeSystem(dark) {
@@ -74,12 +74,6 @@ test('watchSystemTheme ignores an OS change when the user picked light or dark',
   watchSystemTheme()
   os.flip(true)
   expect(document.documentElement.dataset.theme).toBe('light')
-})
-
-test('nextTheme cycles system, light, dark, system', () => {
-  expect(nextTheme('system')).toBe('light')
-  expect(nextTheme('light')).toBe('dark')
-  expect(nextTheme('dark')).toBe('system')
 })
 
 test('setThemePref persists the choice and applies it', () => {

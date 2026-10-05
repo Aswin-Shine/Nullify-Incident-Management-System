@@ -24,10 +24,12 @@ const COUNTER_FROM = 3500;  // the counter only shows when the limit is near
 const ago = (iso) => formatDistanceToNow(new Date(iso), { addSuffix: true });
 const Stamp = ({ iso }) => <span className="comment-time" title={ago(iso)}>{fmtStamp(iso)}</span>;
 
-// Comments and history events, merged oldest first.
-export function CommentsSection({ wiId, refreshTick }) {
+// Comments and history events, merged oldest first. `history` is the parent's query when it already loads the events
+// (the incident detail does), so they are fetched once; without it this section loads them itself.
+export function CommentsSection({ wiId, refreshTick, history: shared }) {
   const comments = useQuery(wiId, () => fetchComments(wiId), refreshTick);
-  const history = useQuery(wiId, () => fetchHistory(wiId), refreshTick);
+  const own = useQuery(shared ? null : wiId, () => fetchHistory(wiId), refreshTick);
+  const history = shared ?? own;
   const toast = useToast();
   const entries = [
     ...(comments.data ?? []).map(c => ({ ...c, type: 'comment' })),

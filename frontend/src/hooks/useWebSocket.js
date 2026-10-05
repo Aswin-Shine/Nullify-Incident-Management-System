@@ -23,7 +23,7 @@ export function useWebSocket(onMessage, onReconnect, onStatus) {
     let stopped = false;
     let dropped = false;
 
-    const scheduleReconnect = () => { retry = setTimeout(connect, 3000); };
+    const scheduleReconnect = () => { if (!stopped) retry = setTimeout(connect, 3000); };  // a refresh can settle after unmount
 
     function connect() {
       ws = new WebSocket(wsUrl());

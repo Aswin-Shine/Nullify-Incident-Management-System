@@ -115,8 +115,8 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
   const wi = useQuery(id, () => fetchWorkItem(id), refreshTick);
   const signals = useQuery(id, () => fetchSignals(id), refreshTick);
   const rca = useQuery(id, () => fetchRCA(id), refreshTick);
-  // A finished incident names who resolved and who closed it, from the status events. Active ones have nothing to read yet.
-  const history = useQuery(FINISHED.includes(wi.data?.status) ? `${id}:history` : null, () => fetchHistory(id), refreshTick);
+  // The events: who resolved and who closed a finished incident, and the Activity timeline (shared with it).
+  const history = useQuery(`${id}:history`, () => fetchHistory(id), refreshTick);
   // Only people who can assign need the user list (viewers get a 403 for it).
   const users = useQuery(write ? 'users' : null, listUsers);
 
@@ -253,7 +253,7 @@ export function IncidentDetail({ id, onRefresh, refreshTick, onResolve, resolvin
     </div>
   );
 
-  const timelineSection = <CommentsSection key={`timeline:${id}`} wiId={id} refreshTick={refreshTick} />;
+  const timelineSection = <CommentsSection key={`timeline:${id}`} wiId={id} refreshTick={refreshTick} history={history} />;
 
   return (
     <div className="detail" key={incident.id}>
