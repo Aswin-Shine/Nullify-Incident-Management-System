@@ -92,4 +92,6 @@ plan.md
 screenshots/
 # graphify: keep graph.json, GRAPH_REPORT.md and graph.html; ignore the cache and machine-specific files
 graphify-out/
-.impeccable/ 
+.impeccable/
+# Security audit runs (reports, ledgers, evidence)
+security-audit/
