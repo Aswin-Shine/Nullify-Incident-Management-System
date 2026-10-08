@@ -16,7 +16,7 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: Postgres is unreachable
-          description: The exporter cannot connect to Postgres. Signal persistence fails and goes to the lake only.
+          description: The exporter cannot connect to Postgres. Ingestion holds signals and the signal API answers 503 until it is back.
       - alert: RedisDown
         expr: redis_up == 0
         for: 1m
@@ -46,6 +46,19 @@ groups:
         annotations:
           summary: Signals are failing to persist
           description: "{{ $value | humanize }} signals in the last 5 minutes reached only the lake, not Postgres."
+      - alert: IngestBlockedOnDatabase
+        expr: max(nullify_ingest_db_down) == 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Ingestion is blocked on Postgres
+          description: Workers are holding signals and the signal API answers 503 until Postgres is back.
+      - alert: NotificationsFailing
+        expr: sum(increase(nullify_notifications_failed_total[10m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: Slack or PagerDuty notifications are failing
+          description: "{{ $value | humanize }} notifications failed after every retry in the last 10 minutes. Someone may not have been paged."
       - alert: DbRetriesSpiking
         expr: sum(rate(nullify_db_retries_total[5m])) > 1
         for: 5m

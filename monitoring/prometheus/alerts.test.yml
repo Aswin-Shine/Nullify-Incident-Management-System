@@ -83,3 +83,39 @@ tests:
       - eval_time: 12m
         alertname: HighErrorRate
         exp_alerts: []
+
+  - name: one notification failing after its retries fires NotificationsFailing at once
+    interval: 1m
+    input_series:
+      - series: 'nullify_notifications_failed_total{channel="pagerduty"}'
+        values: '0 0 0 1 1'
+      - series: 'nullify_notifications_failed_total{channel="slack"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NotificationsFailing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: NotificationsFailing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Slack or PagerDuty notifications are failing
+              description: "1 notifications failed after every retry in the last 10 minutes. Someone may not have been paged."
+
+  - name: a worker blocked on Postgres for a minute fires IngestBlockedOnDatabase
+    interval: 15s
+    input_series:
+      - series: 'nullify_ingest_db_down'
+        values: '0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: IngestBlockedOnDatabase
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: IngestBlockedOnDatabase
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Ingestion is blocked on Postgres
+              description: Workers are holding signals and the signal API answers 503 until Postgres is back.
