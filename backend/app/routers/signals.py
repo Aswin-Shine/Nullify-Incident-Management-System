@@ -17,6 +17,8 @@ RETRY_AFTER = {"Retry-After": "1"}
 def _require_accepting():
     if not ingestion.accepting():
         raise HTTPException(503, "Shutting down, retry against another instance.", headers=RETRY_AFTER)
+    if not ingestion.db_available():  # held signals wait for Postgres; new ones must not pile up behind them
+        raise HTTPException(503, "Database unavailable, retry later.", headers={"Retry-After": "5"})
 
 
 @router.post("", status_code=202)

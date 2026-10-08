@@ -1,4 +1,5 @@
 """DB write retry: only transient errors are retried, with growing backoff."""
+import socket
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ def _with_sqlstate(code):
     _with_sqlstate("08006"),  # connection failure
     ConnectionError("refused"),
     TimeoutError(),
+    socket.gaierror(-2, "Name or service not known"),  # Compose drops a stopped container's DNS name; asyncpg raises it raw
 ])
 def test_transient_errors_are_retryable(exc):
     assert is_transient(exc)

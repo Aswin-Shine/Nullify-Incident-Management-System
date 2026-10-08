@@ -359,11 +359,22 @@ async def test_a_chatty_revoked_socket_is_still_closed_at_the_deadline(make_user
 
     user = await make_user("sre")
     ws = ChattySocket(create_access_token({"sub": user["id"], "role": "sre", "tv": 0}))
-    async with AsyncSessionLocal() as db:
-        await db.execute(update(User).where(User.id == user["id"]).values(is_active=False))
-        await db.commit()
     with patch("app.routers.ws.WS_RECHECK_SECONDS", 0.1):
-        await asyncio.wait_for(websocket_endpoint(ws), 2)
+        task = asyncio.create_task(websocket_endpoint(ws))
+        await asyncio.sleep(0.03)
+        assert ws.sent == [{"event": "auth_ok"}]
+        async with AsyncSessionLocal() as db:
+            await db.execute(update(User).where(User.id == user["id"]).values(is_active=False))
+            await db.commit()
+        await asyncio.wait_for(task, 2)
 
     assert ws.closed_with == [1008]
     assert ws not in manager._connections
+
+
+def test_production_rejects_the_published_readme_secret():
+    from pydantic import ValidationError
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(app_env="production", app_secret_key="your-super-secret-key-change-this-in-production")

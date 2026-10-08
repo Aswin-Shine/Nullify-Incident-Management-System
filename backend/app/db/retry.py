@@ -20,7 +20,9 @@ _TRANSIENT_SQLSTATES = {"40001", "40P01", "57P01", "57P02", "57P03"}
 
 
 def is_transient(exc: BaseException) -> bool:
-    if isinstance(exc, (OperationalError, InterfaceError, ConnectionError, TimeoutError)):
+    # OSError covers ConnectionError and TimeoutError, and the socket.gaierror asyncpg raises unwrapped when the
+    # DB host stops resolving (Compose removes a stopped container's DNS name).
+    if isinstance(exc, (OperationalError, InterfaceError, OSError)):
         return True
     if isinstance(exc, DBAPIError):
         if exc.connection_invalidated:

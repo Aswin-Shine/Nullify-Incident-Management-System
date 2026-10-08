@@ -26,16 +26,22 @@ SIGNAL_PROCESSING = Histogram("nullify_signal_processing_seconds", "Time to stor
                               buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5))
 # The deepest worker queue, not the sum: a 429 happens when any one worker's queue is full.
 QUEUE_DEPTH = Gauge("nullify_ingest_queue_depth", "Signals waiting in the deepest worker queue", multiprocess_mode="livemax")
+INGEST_BATCH_SIZE = Histogram("nullify_ingest_batch_size", "Signals a worker stored in one batch",
+                              buckets=(1, 5, 20, 50, 100, 200))
+INGEST_DB_DOWN = Gauge("nullify_ingest_db_down", "1 while a worker holds signals through a Postgres outage", multiprocess_mode="livemax")
 QUEUE_CAPACITY = Gauge("nullify_ingest_queue_capacity", "Capacity of one worker's ingest queue", multiprocess_mode="mostrecent")
 INCIDENTS_CREATED = Counter("nullify_incidents_created", "Incidents opened by ingestion", ["priority"])
 TRANSITIONS = Counter("nullify_incident_transitions", "Status changes, by the status moved to", ["to"])
 OPEN_INCIDENTS = Gauge("nullify_open_incidents", "OPEN and INVESTIGATING incidents", ["priority"], multiprocess_mode="mostrecent")
 WS_CONNECTIONS = Gauge("nullify_websocket_connections", "Live dashboard WebSockets", multiprocess_mode="livesum")
 DB_RETRIES = Counter("nullify_db_retries", "Retries of a DB write after a transient error")
+NOTIFICATIONS_FAILED = Counter("nullify_notifications_failed", "Slack/PagerDuty notifications that failed after every retry", ["channel"])
 
 for _p in PRIORITIES:  # every series exists from the start, so dashboards and rate() see zeros, not gaps
     INCIDENTS_CREATED.labels(priority=_p)
 SIGNALS_REJECTED.labels(reason="queue_full")
+for _c in ("slack", "pagerduty"):
+    NOTIFICATIONS_FAILED.labels(channel=_c)
 for _s in ("INVESTIGATING", "RESOLVED", "CLOSED"):
     TRANSITIONS.labels(to=_s)
 for _o in ("ok", "failed"):

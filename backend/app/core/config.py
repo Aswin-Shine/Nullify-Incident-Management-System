@@ -31,7 +31,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _strong_secret_in_production(self) -> "Settings":
-        if self.app_env == "production" and (self.app_secret_key == DEFAULT_SECRET or len(self.app_secret_key) < 32):
+        published = ("your-super-secret-key-change-this-in-production",)  # old README sample
+        if self.app_env == "production" and (
+            self.app_secret_key == DEFAULT_SECRET or self.app_secret_key in published or len(self.app_secret_key) < 32
+        ):
             raise ValueError("APP_SECRET_KEY must be a random string of at least 32 characters in production")
         return self
 
@@ -89,11 +92,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Rate limiting (fixed windows in Redis, shared by every worker/replica)
-    rate_limit_ingest_per_sec: int = 2000   # requests per principal; a batch counts as one request
+    rate_limit_ingest_per_sec: int = 2000   # signals per principal; a batch of 500 costs 500
     rate_limit_auth_per_min: int = 10       # login/register attempts per client IP
 
     # Ingestion
-    queue_max_size: int = 50_000
+    # Per worker process, sized from memory: a full queue in each of 4 workers at the worst signal size (12 KB raw,
+    # ~36 KB as dicts) is ~720 MB on top of ~400 MB idle, under the 1536m mem_limit (test_deploy_config checks it).
+    # 50k used to OOM the container exactly when backpressure mattered.
+    # ponytail: a count bound; a byte budget if typical signals are small and 5k proves shallow under load.
+    queue_max_size: int = 5_000
     ingestion_workers: int = 4
     shutdown_drain_seconds: float = 20.0    # keep below docker-compose stop_grace_period
 

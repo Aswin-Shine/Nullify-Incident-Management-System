@@ -1,6 +1,7 @@
 """PostgreSQL — async SQLAlchemy engine + ORM models."""
 from __future__ import annotations
 from datetime import datetime, timezone
+from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
@@ -177,6 +178,21 @@ class WorkItemEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     actor: Mapped[User | None] = relationship("User")
+
+
+ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+
+
+async def schema_revisions() -> tuple[str | None, str]:
+    """(the database's Alembic revision, the head this code was written for). Startup refuses a mismatch."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
+    async with engine.connect() as conn:
+        current = await conn.run_sync(lambda c: MigrationContext.configure(c).get_current_revision())
+    return current, head
 
 
 async def get_db():

@@ -57,6 +57,27 @@ async def test_limiter_fails_open_when_redis_is_down(client, make_headers, monke
     assert codes == [202, 202, 202]
 
 
+async def test_login_is_still_limited_per_process_when_redis_is_down(client, monkeypatch):
+    """Failing open is right for signals, but not for logins: password guessing would be unlimited."""
+    monkeypatch.setattr(get_settings(), "rate_limit_auth_per_min", 2)
+
+    with frozen_clock(), patch("app.core.rate_limit.cache.incr", side_effect=ConnectionError("redis down")):
+        codes = [(await client.post("/api/auth/login", json=BAD_LOGIN)).status_code for _ in range(3)]
+
+    assert codes == [401, 401, 429]
+
+
+async def test_a_counter_always_gets_its_ttl():
+    """INCR then EXPIRE as two calls could leave a counter with no TTL (and no eviction) if the second was lost."""
+    from app.db import cache
+    await cache._r().set("ims:rl:test:orphan", 5)  # what a lost EXPIRE left behind
+
+    assert await cache.incr("rl:test:orphan", ttl=60) == 6
+    assert await cache.incr("rl:test:fresh", ttl=60) == 1
+    for key in ("ims:rl:test:orphan", "ims:rl:test:fresh"):
+        assert 0 < await cache._r().ttl(key) <= 60
+
+
 async def test_queue_full_429_tells_producer_when_to_retry(client, make_headers):
     headers = await make_headers("sre")
 

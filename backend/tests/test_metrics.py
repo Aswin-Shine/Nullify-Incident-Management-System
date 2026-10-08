@@ -49,8 +49,8 @@ async def test_processing_counts_outcomes_times_them_and_counts_new_incidents():
     assert value("nullify_signal_processing_seconds_count") == timed + 2
     assert value("nullify_incidents_created_total", priority="P2") == created + 1
 
-    with patch("app.services.ingestion._persist", side_effect=OperationalError("x", {}, Exception("db down"))), \
-         patch("app.services.ingestion.settings.db_retry_attempts", 1):
+    # Only a non-transient error fails a signal now; a transient one holds it until Postgres is back.
+    with patch("app.services.ingestion._persist", side_effect=RuntimeError("bad row")):
         await process_signal(sig("CACHE_N"))
     assert value("nullify_signals_processed_total", outcome="failed") == failed + 1
 

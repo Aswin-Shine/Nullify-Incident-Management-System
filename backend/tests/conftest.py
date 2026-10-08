@@ -70,10 +70,11 @@ async def clean_state(test_database):
         await conn.execute(text(TRUNCATE_ALL))
     await cache.init_redis()
     await cache._r().flushdb()
-    from app.services.ingestion import _queue
+    from app.services.ingestion import _dirty, _queue
     while not _queue.empty():  # API tests enqueue without running workers; start every test empty
         _queue.get_nowait()
         _queue.task_done()
+    _dirty.clear()  # signal_ingested events no earlier test flushed
     yield
     await cache.close_redis()
 

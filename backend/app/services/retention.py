@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 from datetime import datetime, timedelta, timezone
 
@@ -15,11 +14,11 @@ from sqlalchemy import delete, select
 
 from app.core.config import get_settings
 from app.db import cache
+from app.db.nosql import DAY_DIR
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg
 
 logger = logging.getLogger("ims.retention")
 BATCH = 10_000  # rows per DELETE, so one run never holds a long lock on a busy table
-DAY_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _drop_lake_days(lake_dir: str, before_day: str) -> int:
@@ -32,11 +31,24 @@ def _drop_lake_days(lake_dir: str, before_day: str) -> int:
 
 
 async def purge(now: datetime | None = None) -> dict | None:
-    """Delete what is past the window. None when retention is off or another worker already ran it today."""
+    """Delete what is past the window. None when retention is off, another worker is running it, or it already
+    finished today. The day is marked done only after a successful run, so a failed run is retried next hour."""
     s = get_settings()
     now = now or datetime.now(timezone.utc)
-    if s.retention_days <= 0 or not await cache.claim(f"retention:{now:%Y-%m-%d}", ttl=2 * 86400):
+    done = f"retention:done:{now:%Y-%m-%d}"
+    if s.retention_days <= 0 or not await cache.claim("retention:lock", ttl=3600):
         return None
+    try:
+        if await cache.get_val(done):  # checked under the lock: a worker that just finished set it before releasing
+            return None
+        result = await _run(s, now)
+        await cache.set_val(done, 1, ttl=2 * 86400)
+        return result
+    finally:
+        await cache.delete_val("retention:lock")
+
+
+async def _run(s, now: datetime) -> dict:
     cutoff = now - timedelta(days=s.retention_days)
     signals = 0
     async with AsyncSessionLocal() as db:

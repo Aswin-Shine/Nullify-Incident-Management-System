@@ -7,6 +7,7 @@ import asyncio
 import json
 import glob
 import os
+import socket
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -16,7 +17,8 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.config import get_settings
 from app.db.postgres import AsyncSessionLocal, Signal, TimeseriesAgg, WorkItem
-from app.services.ingestion import process_signal
+from app.services import ingestion
+from app.services.ingestion import process_batch, process_signal
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("clean_state")]
 
@@ -221,14 +223,95 @@ async def test_transient_db_error_is_retried_without_double_counting():
     assert line["work_item_id"] == wi_id
 
 
-async def test_retries_give_up_and_audit_log_keeps_signal():
-    upsert, calls = _upsert_failing(99, OperationalError("stmt", {}, Exception("db down")))
-    with patch("app.services.ingestion.upsert_active_work_item", side_effect=upsert):
-        assert await process_signal(sig("CACHE_RETRY_DOWN")) is None
+async def test_transient_outage_holds_signal_until_db_returns():
+    """An outage longer than the retries must not send the signal to the lake without an incident."""
+    rounds = 2 * get_settings().db_retry_attempts
+    upsert, calls = _upsert_failing(rounds, OperationalError("stmt", {}, Exception("db down")))
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=upsert), \
+         patch("app.services.ingestion.asyncio.sleep", new_callable=AsyncMock):
+        wi_id = await process_signal(sig("CACHE_OUTAGE"))
 
-    assert len(calls) == get_settings().db_retry_attempts
-    [line] = lake_lines("CACHE_RETRY_DOWN")
-    assert line["work_item_id"] is None
+    assert wi_id is not None
+    assert len(calls) == rounds + 1
+    [wi] = await all_work_items()
+    assert (wi.id, wi.signal_count) == (wi_id, 1)
+    [line] = lake_lines("CACHE_OUTAGE")
+    assert line["work_item_id"] == wi_id
+
+
+async def test_each_signal_gets_an_id_in_its_row_and_lake_line():
+    """replay-lake tells signals apart by it: received_at alone collides across worker processes."""
+    await process_signal(sig("CACHE_ID"))
+    await process_signal(sig("CACHE_ID"))
+
+    async with AsyncSessionLocal() as db:
+        ids = [s.payload["signal_id"] for s in (await db.execute(select(Signal))).scalars().all()]
+    assert len(set(ids)) == 2
+    assert sorted(line["signal_id"] for line in lake_lines("CACHE_ID")) == sorted(ids)
+
+
+async def test_breaker_opens_during_outage_and_closes_on_success():
+    from app.services import ingestion
+    attempts = get_settings().db_retry_attempts
+    upsert, _ = _upsert_failing(2 * attempts, OperationalError("stmt", {}, Exception("db down")))
+    seen = []
+
+    async def watching(*args, **kwargs):
+        seen.append(ingestion.db_available())
+        return await upsert(*args, **kwargs)
+
+    with patch("app.services.ingestion.upsert_active_work_item", side_effect=watching), \
+         patch("app.services.ingestion.asyncio.sleep", new_callable=AsyncMock):
+        await process_signal(sig("CACHE_BREAKER"))
+
+    assert seen == [True] * attempts + [False] * (attempts + 1)  # open after the first failed round
+    assert ingestion.db_available()
+
+
+async def test_ingest_returns_503_with_retry_after_while_db_down(client, make_headers, monkeypatch):
+    from app.services import ingestion
+    headers = await make_headers("sre")
+    monkeypatch.setattr(ingestion, "_db_down", True)
+
+    single = await client.post("/api/signals", json=sig(), headers=headers)
+    batch = await client.post("/api/signals/batch", json=[sig()], headers=headers)
+
+    for r in (single, batch):
+        assert r.status_code == 503
+        assert r.headers["Retry-After"] == "5"
+    assert ingestion._queue.qsize() == 0
+
+
+@pytest.mark.parametrize("error", [
+    OperationalError("SELECT", {}, Exception("connection refused")),
+    socket.gaierror(-2, "Name or service not known"),  # a stopped Compose container: asyncpg raises it unwrapped
+])
+async def test_db_outage_in_auth_returns_503_not_500(client, make_headers, error):
+    """Producers authenticate against Postgres, so during an outage the request fails before the breaker check."""
+    from app.db.postgres import get_db
+    from app.main import app
+    headers = await make_headers("sre")
+
+    class Down:
+        async def execute(self, *args, **kwargs):
+            raise error
+
+        async def rollback(self):
+            pass
+
+    async def down_db():
+        yield Down()
+
+    app.dependency_overrides[get_db] = down_db
+    try:
+        signal = await client.post("/api/signals", json=sig(), headers=headers)
+        listing = await client.get("/api/work-items", headers=headers)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    for r in (signal, listing):
+        assert r.status_code == 503
+        assert r.headers["Retry-After"] == "5"
 
 
 async def test_integrity_error_is_not_retried():
@@ -267,6 +350,7 @@ async def test_created_event_is_broadcast_after_commit():
 
     with patch("app.services.ingestion.manager.broadcast", side_effect=spy):
         await process_signal(sig("RDBMS_PRIMARY"))
+        await ingestion.flush_ingested()
 
     assert seen == [1, 1]  # work_item_created, then signal_ingested: both after the commit
 
@@ -285,10 +369,26 @@ async def test_detail_cache_is_dropped_when_a_signal_joins_an_existing_incident(
 
 async def test_each_saved_signal_is_broadcast_with_its_incident_id():
     wi_id = await process_signal(sig("RDBMS_PRIMARY"))
+    await ingestion.flush_ingested()
     with patch("app.services.ingestion.manager.broadcast", new_callable=AsyncMock) as broadcast:
         await process_signal(sig("RDBMS_PRIMARY"))
+        await ingestion.flush_ingested()
 
     broadcast.assert_awaited_once_with({"event": "signal_ingested", "id": wi_id, "component": "RDBMS_PRIMARY"})
+
+
+async def test_signal_ingested_is_sent_once_per_incident_per_flush():
+    """M2: every saved signal used to be broadcast, and every dashboard refetched on each one."""
+    with patch("app.services.ingestion.manager.broadcast", new_callable=AsyncMock) as broadcast:
+        for component in ("RDBMS_A", "RDBMS_A", "RDBMS_A", "CACHE_B"):
+            await process_signal(sig(component))
+        before_flush = [c.args[0]["event"] for c in broadcast.call_args_list]
+        await ingestion.flush_ingested()
+        await ingestion.flush_ingested()  # nothing new: sends nothing
+
+    assert before_flush == ["work_item_created", "work_item_created"]  # new incidents are still immediate
+    ingested = [c.args[0]["component"] for c in broadcast.call_args_list if c.args[0]["event"] == "signal_ingested"]
+    assert sorted(ingested) == ["CACHE_B", "RDBMS_A"]
 
 
 async def test_posting_a_signal_does_not_broadcast_before_it_is_saved(client, make_headers):
@@ -298,6 +398,102 @@ async def test_posting_a_signal_does_not_broadcast_before_it_is_saved(client, ma
 
     assert r.status_code == 202
     broadcast.assert_not_awaited()
+
+
+# -- H1: a worker stores what is queued in one transaction per component -------------------------
+
+async def stored_signals():
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Signal))).scalars().all()
+
+
+async def test_batch_of_one_component_opens_one_incident_with_count_n():
+    ids = await process_batch([sig("RDBMS_STORM") for _ in range(5)])
+
+    [wi] = await all_work_items()
+    assert ids == [wi.id] * 5
+    assert wi.signal_count == 5
+    assert len(await stored_signals()) == 5
+
+
+async def test_mixed_batch_groups_per_component_and_keeps_order():
+    ids = await process_batch([sig("RDBMS_A"), sig("CACHE_B"), sig("RDBMS_A")])
+
+    by_component = {wi.component: wi for wi in await all_work_items()}
+    assert ids == [by_component["RDBMS_A"].id, by_component["CACHE_B"].id, by_component["RDBMS_A"].id]
+    assert (by_component["RDBMS_A"].signal_count, by_component["CACHE_B"].signal_count) == (2, 1)
+
+
+async def test_batch_sets_start_and_last_signal_to_min_and_max():
+    now = datetime.now(timezone.utc)
+    t = [now - timedelta(minutes=m) for m in (2, 3, 1)]
+    await process_batch([sig("RDBMS_T", ts=x.isoformat()) for x in t])
+
+    [wi] = await all_work_items()
+    assert (wi.start_time, wi.last_signal_at) == (min(t), max(t))
+
+
+async def test_batch_timeseries_adds_per_minute_bucket():
+    minute = datetime.now(timezone.utc).replace(second=30, microsecond=0)
+    earlier = minute - timedelta(minutes=1)
+    await process_batch([sig("RDBMS_TS", ts=x.isoformat()) for x in (minute, earlier, minute)])
+    await process_batch([sig("RDBMS_TS", ts=minute.isoformat())])  # adds to an existing bucket
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(select(TimeseriesAgg.bucket, TimeseriesAgg.signal_count)
+                                 .where(TimeseriesAgg.component == "RDBMS_TS"))).all()
+    assert dict(rows) == {earlier.strftime("%Y-%m-%dT%H:%M"): 1, minute.strftime("%Y-%m-%dT%H:%M"): 3}
+
+
+async def test_batch_pages_once_and_broadcasts_once_per_group(mock_webhooks):
+    with patch("app.services.ingestion.manager.broadcast", new_callable=AsyncMock) as broadcast:
+        await process_batch([sig("RDBMS_PAGE") for _ in range(5)])
+        await ingestion.flush_ingested()
+
+    mock_webhooks["created"].assert_called_once()
+    assert [c.args[0]["event"] for c in broadcast.call_args_list] == ["work_item_created", "signal_ingested"]
+
+
+async def test_bad_signal_in_a_group_does_not_take_its_neighbours_down():
+    """Postgres rejects a NUL byte in text, so that one signal fails; the group falls back to one at a time."""
+    ids = await process_batch([sig("RDBMS_NUL"), sig("RDBMS_NUL", message="bad\x00byte"), sig("RDBMS_NUL")])
+
+    [wi] = await all_work_items()
+    assert ids == [wi.id, None, wi.id]
+    assert wi.signal_count == 2
+    lines = lake_lines("RDBMS_NUL")
+    assert sorted(str(line["work_item_id"]) for line in lines) == sorted([wi.id, wi.id, "None"])
+
+
+async def test_batch_lake_lines_carry_work_item_id_and_signal_id():
+    ids = await process_batch([sig("RDBMS_LAKE") for _ in range(3)])
+
+    lines = lake_lines("RDBMS_LAKE")
+    assert [line["work_item_id"] for line in lines] == ids
+    assert len({line["signal_id"] for line in lines}) == 3
+
+
+async def test_worker_takes_already_queued_signals_as_one_batch(monkeypatch):
+    from app.services import ingestion
+    monkeypatch.setattr(ingestion, "_accepting", True)  # stop_ingestion_workers clears it; later API tests need it
+    real, groups = ingestion._persist, []
+
+    async def counting(component, items):
+        groups.append(len(items))
+        return await real(component, items)
+
+    for _ in range(50):
+        await ingestion.enqueue_signal(sig("RDBMS_QUEUED"))
+    with patch("app.services.ingestion._persist", side_effect=counting):
+        await ingestion.start_ingestion_workers(1)
+        try:
+            await asyncio.wait_for(ingestion._queue.join(), 10)
+        finally:
+            await ingestion.stop_ingestion_workers(timeout=1)
+
+    assert groups == [50]
+    [wi] = await all_work_items()
+    assert wi.signal_count == 50
 
 
 async def test_batch_signals_carry_the_source_ip(client, make_headers):

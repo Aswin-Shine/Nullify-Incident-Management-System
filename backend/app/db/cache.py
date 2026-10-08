@@ -73,10 +73,10 @@ async def claim(key: str, ttl: int) -> bool:
 
 
 async def incr(key: str, ttl: int = 60, amount: int = 1) -> int:
-    r = _r()
-    val = await r.incr(f"ims:{key}", amount)
-    if val == amount:  # the first increment of this key
-        await r.expire(f"ims:{key}", ttl)
+    """INCRBY and EXPIRE NX in one MULTI: the key always has a TTL, even one an interrupted older call left without
+    (and only keys with a TTL are evictable under volatile-lru)."""
+    async with _r().pipeline(transaction=True) as pipe:
+        val, _ = await pipe.incrby(f"ims:{key}", amount).expire(f"ims:{key}", ttl, nx=True).execute()
     return val
 
 

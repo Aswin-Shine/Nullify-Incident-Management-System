@@ -89,9 +89,10 @@ def record_event(
 
 async def upsert_active_work_item(
     db: AsyncSession, component: str, occurred_at: datetime, signal_type: str, message: str,
-    component_type: str | None = None,
+    component_type: str | None = None, count: int = 1, last_at: datetime | None = None,
 ) -> Row:
-    """Attach a signal to the component's active (OPEN/INVESTIGATING) Work Item, creating one if needed.
+    """Attach `count` signals (the earliest at `occurred_at`, the latest at `last_at`) to the component's active
+    (OPEN/INVESTIGATING) Work Item, creating one if needed.
 
     A single INSERT ... ON CONFLICT against the partial unique index `ux_wi_active_component`, so
     concurrent callers in any process agree on one incident. Returns the row with a `created` flag.
@@ -102,7 +103,7 @@ async def upsert_active_work_item(
     ins = pg_insert(WorkItem).values(
         id=str(uuid.uuid4()), component=component, priority=priority, status="OPEN",
         title=f"{component} - {signal_type}", description=strategy.notify(component, message),
-        start_time=occurred_at, last_signal_at=occurred_at, signal_count=1,
+        start_time=occurred_at, last_signal_at=last_at or occurred_at, signal_count=count,
         sla_deadline=occurred_at + timedelta(minutes=SLA_MINUTES[priority]),
         created_at=now, updated_at=now,
     )
@@ -110,7 +111,7 @@ async def upsert_active_work_item(
         index_elements=[WorkItem.component],
         index_where=text(ACTIVE_WHERE),
         set_={
-            "signal_count": WorkItem.signal_count + 1,
+            "signal_count": WorkItem.signal_count + ins.excluded.signal_count,
             "start_time": func.least(WorkItem.start_time, ins.excluded.start_time),
             "last_signal_at": func.greatest(WorkItem.last_signal_at, ins.excluded.last_signal_at),
             "updated_at": now,

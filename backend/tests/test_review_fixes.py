@@ -217,12 +217,15 @@ def test_a_dead_workers_live_gauge_is_no_longer_counted(tmp_path):
 async def test_a_signal_cancelled_during_its_lake_write_is_not_spilled_again(monkeypatch):
     lines = []
 
-    async def append_then_cancel(record):
-        lines.append(record)
-        if len(lines) == 1:
-            raise asyncio.CancelledError  # the worker is cancelled while the write is in flight
+    async def append_then_cancel(component, records):  # the worker's batched lake write
+        lines.extend(records)
+        raise asyncio.CancelledError  # the worker is cancelled while the write is in flight
 
-    monkeypatch.setattr(ingestion, "append_signal", append_then_cancel)
+    async def spill_write(record):  # a second write would come from the spill
+        lines.append(record)
+
+    monkeypatch.setattr(ingestion, "append_signals", append_then_cancel)
+    monkeypatch.setattr(ingestion, "append_signal", spill_write)
     await ingestion._queue.put(sig("CACHE_ONCE"))
     worker = asyncio.create_task(ingestion._worker())
     with pytest.raises(asyncio.CancelledError):

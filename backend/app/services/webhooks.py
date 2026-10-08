@@ -2,8 +2,10 @@
 from __future__ import annotations
 import asyncio
 import logging
+import random
 import httpx
 from app.core.config import get_settings
+from app.core.metrics import NOTIFICATIONS_FAILED
 from app.services.alert_strategy import channels_for_priority, get_alert_strategy
 
 logger = logging.getLogger("ims.webhooks")
@@ -11,6 +13,9 @@ settings = get_settings()
 
 PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
 PAGERDUTY_SEVERITY = {"P0": "critical", "P1": "error", "P2": "warning", "P3": "info"}
+PAGERDUTY_URL = "https://events.pagerduty.com/v2/enqueue"
+RETRY_DELAYS = (0.5, 1, 2)  # backoff before attempts 2, 3 and 4
+MAX_RETRY_AFTER = 10.0      # a 429's Retry-After is honoured up to this
 
 
 _background: set[asyncio.Task] = set()
@@ -22,6 +27,56 @@ def spawn(coro) -> asyncio.Task:
     _background.add(task)
     task.add_done_callback(_background.discard)
     return task
+
+
+async def drain(timeout: float) -> int:
+    """Wait up to `timeout` seconds for notifications in flight, so a deploy does not cut a page off; cancel the
+    rest. Returns how many were cancelled."""
+    if not _background:
+        return 0
+    _, pending = await asyncio.wait(set(_background), timeout=timeout)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    return len(pending)
+
+
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=5)
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    try:
+        return min(float(response.headers["Retry-After"]), MAX_RETRY_AFTER)
+    except (KeyError, ValueError):
+        return None  # absent, or an HTTP date: use the backoff
+
+
+async def _post(channel: str, url: str, payload: dict) -> bool:
+    """POST, retrying network errors, 429 and 5xx with backoff. Once it gives up the failure is logged and counted
+    (nullify_notifications_failed_total, alerted on) and False is returned; it never raises."""
+    async with _client() as client:
+        for backoff in (*RETRY_DELAYS, None):
+            wait = None
+            try:
+                r = await client.post(url, json=payload)
+                if r.is_success:
+                    return True
+                problem = f"HTTP {r.status_code}"
+                if r.status_code != 429 and r.status_code < 500:
+                    break  # any other 4xx fails the same way again
+                wait = _retry_after(r)
+            except httpx.TransportError as e:
+                problem = f"{type(e).__name__}: {e}"
+            except Exception as e:  # a bad URL or payload: retrying cannot help
+                problem = f"{type(e).__name__}: {e}"
+                break
+            if backoff is None:
+                break
+            await asyncio.sleep(wait if wait is not None else backoff + random.uniform(0, backoff / 2))
+    logger.warning("%s notification failed after retries: %s", channel, problem)
+    NOTIFICATIONS_FAILED.labels(channel=channel).inc()
+    return False
 
 
 def _channels(work_item: dict) -> tuple[str, ...]:
@@ -77,13 +132,8 @@ async def _slack_notify(work_item: dict, event: str, extra: dict | None = None):
             "footer": "Nullify Alert",
         }]
     }
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.post(settings.slack_webhook_url, json=payload)
-            if r.status_code != 200:
-                logger.warning("Slack webhook returned %d", r.status_code)
-    except Exception as e:
-        logger.warning("Slack notify failed: %s", e)
+    # ponytail: a timeout Slack did apply gets posted twice; Slack webhooks have no idempotency key
+    await _post("slack", settings.slack_webhook_url, payload)
 
 
 async def _pagerduty_trigger(work_item: dict):
@@ -104,13 +154,7 @@ async def _pagerduty_trigger(work_item: dict):
             },
         },
     }
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
-            if r.status_code not in (200, 202):
-                logger.warning("PagerDuty trigger returned %d", r.status_code)
-    except Exception as e:
-        logger.warning("PagerDuty trigger failed: %s", e)
+    await _post("pagerduty", PAGERDUTY_URL, payload)  # retries are safe: dedup_key is the incident id
 
 
 async def _pagerduty_resolve(work_item: dict):
@@ -121,8 +165,4 @@ async def _pagerduty_resolve(work_item: dict):
         "event_action": "resolve",
         "dedup_key": work_item.get("id"),
     }
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
-    except Exception as e:
-        logger.warning("PagerDuty resolve failed: %s", e)
+    await _post("pagerduty", PAGERDUTY_URL, payload)
