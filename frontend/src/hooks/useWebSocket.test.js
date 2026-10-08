@@ -44,6 +44,47 @@ test('a dropped connection reconnects after 3 seconds', async () => {
   expect(sockets).toHaveLength(2)
 })
 
+// After a deploy every client used to reconnect (and refetch) at the same moment, 3 s after the drop.
+describe('reconnect backoff (architecture review, Low)', () => {
+  const drop = (i) => act(() => sockets[i].onclose({ code: 1006 }))
+  const authOk = (i) => act(() => sockets[i].onmessage({ data: JSON.stringify({ event: 'auth_ok' }) }))
+  afterEach(() => { vi.restoreAllMocks() })
+
+  test('the wait doubles from 1 s and stops growing at 30 s', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1)  // no jitter: the full wait
+    renderHook(() => useWebSocket(() => {}))
+    const waits = []
+    for (let i = 0; i < 7; i++) {
+      drop(i)
+      let waited = 0
+      while (sockets.length === i + 1) { await vi.advanceTimersByTimeAsync(250); waited += 250 }
+      waits.push(waited)
+    }
+    expect(waits).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000])
+  })
+
+  test('the wait starts over once a connection is authenticated again', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1)
+    renderHook(() => useWebSocket(() => {}))
+    drop(0); await vi.advanceTimersByTimeAsync(1000)
+    drop(1); await vi.advanceTimersByTimeAsync(2000)
+    authOk(2)
+    drop(2)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sockets).toHaveLength(4)
+  })
+
+  test('the wait is jittered, so clients spread out', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)  // the shortest draw: half the wait
+    renderHook(() => useWebSocket(() => {}))
+    drop(0)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(sockets).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets).toHaveLength(2)
+  })
+})
+
 test('a 1008 close refreshes the session and then reconnects', async () => {
   renderHook(() => useWebSocket(() => {}))
   act(() => sockets[0].onclose({ code: 1008 }))

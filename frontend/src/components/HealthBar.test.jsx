@@ -59,6 +59,28 @@ test('the details show the API state, the queue and the feed, with the reconnect
   expect(details.textContent).toContain('Reconnecting · events may be missed')
 })
 
+test('a Redis outage shows in the details but not as an API problem (the API keeps working without it)', async () => {
+  api.fetchHealth.mockResolvedValue({ status: 'ok', redis: 'error', queue_depth: 0, queue_capacity: 5000 })
+  await renderPill({ feed: 'live' })
+  const details = await openDetails()
+  expect(details.textContent).toContain('API OK')
+  expect(details.textContent).toContain('Redis down: live updates across workers and caching are degraded')
+})
+
+test('no Redis line while Redis is fine', async () => {
+  api.fetchHealth.mockResolvedValue({ status: 'ok', redis: 'ok', queue_depth: 0, queue_capacity: 5000 })
+  await renderPill({ feed: 'live' })
+  const details = await openDetails()
+  expect(details.textContent).not.toContain('Redis')
+})
+
+test('no queue numbers when the health check does not report the queue', async () => {
+  api.fetchHealth.mockResolvedValue({ status: 'ok' })  // what anonymous callers and an unreachable API give
+  await renderPill({ feed: 'live' })
+  const details = await openDetails()
+  expect(details.textContent).not.toContain('Queue')
+})
+
 test('the idle line says the feed is live, and only when it is', async () => {
   const { unmount } = await renderPill({ feed: 'live' })
   expect((await openDetails()).textContent).toContain('No new signals')

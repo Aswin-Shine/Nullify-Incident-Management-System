@@ -58,9 +58,19 @@ function Dashboard() {
   const [theme, setTheme] = useState(getThemePref);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const split = useSplitWidth();
-  const refresh = useCallback(() => setRefreshTick(t => t + 1), []);
-  // A burst of WebSocket events becomes one refetch per second instead of one per event.
-  const refreshOnEvent = useCoalesced(refresh, 1000);
+  // Live events refetch only what they change, at most once a second each (architecture review M2): the list on
+  // incident changes (it shows no signal counts), the open incident on its own events, Analytics (it charts signals,
+  // and is mounted only on its tab) on any. A refresh (mutation, reconnect) refetches all three.
+  const [detailTick, setDetailTick] = useState(0);
+  const [analyticsTick, setAnalyticsTick] = useState(0);
+  const refresh = useCallback(() => {
+    setRefreshTick(t => t + 1);
+    setDetailTick(t => t + 1);
+    setAnalyticsTick(t => t + 1);
+  }, []);
+  const listOnEvent = useCoalesced(() => setRefreshTick(t => t + 1), 1000);
+  const detailOnEvent = useCoalesced(() => setDetailTick(t => t + 1), 1000);
+  const analyticsOnEvent = useCoalesced(() => setAnalyticsTick(t => t + 1), 1000);
 
   // The Analytics tiles count a view of the list; open it exactly as counted (no leftover search or Assigned to me).
   const goToIncidents = (viewPatch) => {
@@ -164,7 +174,9 @@ function Dashboard() {
   }, []);
 
   useWebSocket((msg) => {
-    refreshOnEvent();
+    if (msg.event !== 'signal_ingested') listOnEvent();
+    if (msg.id != null && msg.id === selectedId) detailOnEvent();
+    analyticsOnEvent();
     if (msg.event === 'work_item_created' && msg.priority === 'P0') alertP0(msg);
     const label =
       msg.event === 'signal_ingested'   ? `signal → ${msg.component}` :
@@ -252,7 +264,7 @@ function Dashboard() {
                   </button>
                 )}
                 <ErrorBoundary resetKey={selectedId}>
-                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={refreshTick} onOpened={setOpenInfo} onClose={goBack}
+                  <IncidentDetail id={selectedId} onRefresh={refresh} refreshTick={detailTick} onOpened={setOpenInfo} onClose={goBack}
                     onResolve={resolve} resolving={!!resolver.pending[selectedId]} askNote={askNote} />
                 </ErrorBoundary>
               </div>
@@ -261,7 +273,7 @@ function Dashboard() {
           {activeTab === 'analytics' && (
             <div className="pane pane-row">
               <ErrorBoundary>
-                <AnalyticsPanel refreshTick={refreshTick} onShowIncidents={goToIncidents} />
+                <AnalyticsPanel refreshTick={analyticsTick} onShowIncidents={goToIncidents} />
               </ErrorBoundary>
             </div>
           )}

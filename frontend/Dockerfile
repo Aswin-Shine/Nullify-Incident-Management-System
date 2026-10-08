@@ -1,11 +1,11 @@
 # ============================================================
 # Nullify — Frontend Dockerfile (multi-stage)
-# Stage 1: builder  — Node 20, npm ci, vite build
+# Stage 1: builder: Node 22 LTS, npm ci, vite build
 # Stage 2: runtime  — nginx:alpine serves static dist/
 # ============================================================
 
 # ── Stage 1: builder ────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /build
 
@@ -26,7 +26,10 @@ RUN npm run build
 
 
 # ── Stage 2: runtime ────────────────────────────────────────
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.30-alpine AS runtime
+
+# Alpine security fixes released after the base image was built (CI's Trivy gate fails on fixable HIGH/CRITICAL)
+RUN apk upgrade --no-cache
 
 LABEL org.opencontainers.image.title="nullify-frontend"
 LABEL org.opencontainers.image.description="Nullify IMS — React frontend (static)"

@@ -10,12 +10,13 @@ const mockDetail = vi.hoisted(() => ({ status: 'OPEN' }))  // the state the mock
 vi.mock('./components/IncidentDetail', async () => {
   const { useEffect } = await import('react')
   return {
-    IncidentDetail: ({ id, onResolve, resolving, onOpened, onClose, askNote }) => {
+    IncidentDetail: ({ id, onResolve, resolving, onOpened, onClose, askNote, refreshTick }) => {
       // The real pane reports the incident it loaded; here every id loads as an unowned incident named COMP_<id>, OPEN unless a test sets mockDetail.status.
       useEffect(() => { if (id) onOpened?.({ id, component: `COMP_${id}`, status: mockDetail.status, assignee_id: null }) }, [id, onOpened])
       return (
         <>
           <div data-testid="detail">{String(id)}</div>
+          <div data-testid="detail-tick">{refreshTick}</div>
           <button type="button" onClick={() => onResolve({ id, component: 'RDBMS_X' }, 'Failed over')}>mock resolve</button>
           {id && <button type="button" onClick={onClose}>mock deselect</button>}
           {resolving && <span>mock resolving</span>}
@@ -293,6 +294,51 @@ test('the WebSocket reconnect callback refetches the incident list (F-35)', asyn
   const before = api.fetchWorkItems.mock.calls.length
   act(() => { useWebSocket.mock.calls.at(-1)[1]() })
   await waitFor(() => expect(api.fetchWorkItems.mock.calls.length).toBe(before + 1))
+})
+
+describe('live events refetch only what they change (architecture review M2)', () => {
+  // The session restore needs real timers; the 1 s coalescing is then driven by fake ones.
+  const openIncident = async () => {
+    window.history.replaceState(null, '', '/?incident=abc')
+    await open('sre')
+    await screen.findByText('No incidents')
+    vi.useFakeTimers()
+    return { list: api.fetchWorkItems.mock.calls.length, detail: screen.getByTestId('detail-tick').textContent }
+  }
+  const settle = () => act(async () => { vi.advanceTimersByTime(1100) })
+  afterEach(() => { vi.useRealTimers() })
+
+  test('a signal for another incident refetches neither the open incident nor the list', async () => {
+    const before = await openIncident()
+    emit({ event: 'signal_ingested', id: 'other', component: 'CACHE_O' })
+    await settle()
+    expect(screen.getByTestId('detail-tick').textContent).toBe(before.detail)
+    expect(api.fetchWorkItems.mock.calls.length).toBe(before.list)
+  })
+
+  test('signals for the open incident refetch it once a second, not the list', async () => {
+    const before = await openIncident()
+    for (let i = 0; i < 5; i++) emit({ event: 'signal_ingested', id: 'abc', component: 'COMP_abc' })
+    await settle()
+    expect(Number(screen.getByTestId('detail-tick').textContent)).toBe(Number(before.detail) + 1)
+    expect(api.fetchWorkItems.mock.calls.length).toBe(before.list)
+  })
+
+  test('a status change elsewhere refetches the list but not the open incident', async () => {
+    const before = await openIncident()
+    emit({ event: 'work_item_updated', id: 'other', status: 'RESOLVED' })
+    await settle()
+    expect(api.fetchWorkItems.mock.calls.length).toBe(before.list + 1)
+    expect(screen.getByTestId('detail-tick').textContent).toBe(before.detail)
+  })
+
+  test('a reconnect refetches the list and the open incident (events were missed)', async () => {
+    const before = await openIncident()
+    act(() => { useWebSocket.mock.calls.at(-1)[1]() })
+    await act(async () => {})
+    expect(api.fetchWorkItems.mock.calls.length).toBe(before.list + 1)
+    expect(Number(screen.getByTestId('detail-tick').textContent)).toBe(Number(before.detail) + 1)
+  })
 })
 
 test('a keydown without a key (browser autofill) neither throws nor opens the palette (F-36)', async () => {

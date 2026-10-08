@@ -26,8 +26,10 @@ export function HealthBar({ feed = 'connecting', liveEvents = [], newP0 = 0, onO
 
   const apiProblem = health && health.status !== 'ok' ? (API_PROBLEM[health.status] ?? 'API degraded') : null;
   const qDepth = health?.queue_depth ?? 0;
-  const qCap = health?.queue_capacity ?? 50000;
-  const qPct = Math.round((qDepth / qCap) * 100);
+  const qCap = health?.queue_capacity;  // only signed-in callers get the queue; no number beats a made-up one
+  const qPct = qCap ? Math.round((qDepth / qCap) * 100) : 0;
+  // The API stays ready without Redis (signals still flow), so this is a detail line, not an API problem.
+  const redisDown = health?.redis === 'error';
   const label = FEED_LABEL[feed];
   const state = apiProblem ? 'problem' : feed;
 
@@ -53,10 +55,15 @@ export function HealthBar({ feed = 'connecting', liveEvents = [], newP0 = 0, onO
             <Popover.Heading className="status-heading">System status</Popover.Heading>
             <p className="status-row" data-ok={!apiProblem}><span className="status-dot" aria-hidden="true" />{apiProblem ?? 'API OK'}</p>
             <p className="status-row" data-state={feed}><span className="status-dot" aria-hidden="true" />{FEED_DETAIL[feed]}</p>
-            <div className="status-queue" data-hot={qPct > 80}>
-              <span>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
-              <span className="meter" aria-hidden="true"><span className="meter-fill" style={{ width: `${Math.min(100, qPct)}%` }} /></span>
-            </div>
+            {redisDown && (
+              <p className="status-row" data-ok={false}><span className="status-dot" aria-hidden="true" />Redis down: live updates across workers and caching are degraded</p>
+            )}
+            {qCap > 0 && (
+              <div className="status-queue" data-hot={qPct > 80}>
+                <span>Queue {qDepth.toLocaleString()} / {qCap.toLocaleString()}</span>
+                <span className="meter" aria-hidden="true"><span className="meter-fill" style={{ width: `${Math.min(100, qPct)}%` }} /></span>
+              </div>
+            )}
             <p className="status-sub">Recent events</p>
             {liveEvents.length > 0 ? (
               <ol className="status-events">{liveEvents.map((e, i) => <li key={i}>{e}</li>)}</ol>

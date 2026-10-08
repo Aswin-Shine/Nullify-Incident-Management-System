@@ -9,6 +9,12 @@ function wsUrl() {
 
 const POLICY_VIOLATION = 1008; // server rejected our auth, usually an expired access token
 
+// 1 s, 2 s, 4 s ... up to 30 s, each drawn between half and all of it, so after a deploy the clients spread out
+// instead of all reconnecting (and refetching) at the same moment.
+export function reconnectDelay(attempt) {
+  return Math.min(30_000, 1000 * 2 ** attempt) * (0.5 + Math.random() / 2);
+}
+
 // `onReconnect` fires when the socket is authenticated again after a drop: events sent meanwhile are gone.
 // `onStatus` hears 'connecting' (before the first auth_ok), 'live' (after any auth_ok) and 'reconnecting' (after a close, until the next auth_ok).
 export function useWebSocket(onMessage, onReconnect, onStatus) {
@@ -22,8 +28,9 @@ export function useWebSocket(onMessage, onReconnect, onStatus) {
     let retry;
     let stopped = false;
     let dropped = false;
+    let attempt = 0;  // failed tries since the last auth_ok
 
-    const scheduleReconnect = () => { if (!stopped) retry = setTimeout(connect, 3000); };  // a refresh can settle after unmount
+    const scheduleReconnect = () => { if (!stopped) retry = setTimeout(connect, reconnectDelay(attempt++)); };  // a refresh can settle after unmount
 
     function connect() {
       ws = new WebSocket(wsUrl());
@@ -38,6 +45,7 @@ export function useWebSocket(onMessage, onReconnect, onStatus) {
           return;
         }
         if (data.event !== 'auth_ok') { onMessageRef.current(data); return; }
+        attempt = 0;
         onStatusRef.current?.('live');
         if (dropped) { dropped = false; onReconnectRef.current?.(); }
       };
