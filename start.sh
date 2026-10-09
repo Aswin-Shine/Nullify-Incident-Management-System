@@ -22,7 +22,8 @@ else
   source .venv/bin/activate
 fi
 
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+alembic upgrade head
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload &   # loopback only: dev mode serves /docs and may run on the default secret
 BACKEND_PID=$!
 echo "  Backend PID: $BACKEND_PID"
 

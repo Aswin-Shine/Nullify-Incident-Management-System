@@ -7,14 +7,15 @@ import asyncio
 import httpx
 import json
 from datetime import datetime, timezone, timedelta
+import os
 import random
 
 BASE = "http://localhost:8000"
 
 # ── Auth credentials ──────────────────────────────────────────────────────────
-# Change these to match an existing admin/sre account in your DB
-MOCK_USERNAME = "Aswin"
-MOCK_PASSWORD = "Aswin0407"
+# Set MOCK_USERNAME / MOCK_PASSWORD in the environment to an existing admin/sre account in your DB
+MOCK_USERNAME = os.environ.get("MOCK_USERNAME", "")
+MOCK_PASSWORD = os.environ.get("MOCK_PASSWORD", "")
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCENARIOS = [

@@ -30,6 +30,7 @@ env/
 .env.local
 .env.*.local
 .env.docker
+.env.server
 !.env.example
 
 # ── Databases ─────────────────────────────────────────────────────────────
@@ -95,3 +96,9 @@ graphify-out/
 .impeccable/
 # Security audit runs (reports, ledgers, evidence)
 security-audit/
+
+# ── Terraform (infra/) ───────────────────────────────────────────────────
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+infra/terraform.tfvars
