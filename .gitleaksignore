@@ -1,0 +1,3 @@
+# Findings checked by hand and accepted (gitleaks reads this file). One fingerprint per line, with the reason.
+# A made-up key in a frontend unit test (AccountPanel shows a newly generated key once); not a real credential.
+f4ab77f3d6a865ea3e49c913c8df9424e55da0b4:frontend/src/components/AccountPanel.test.jsx:generic-api-key:69

@@ -1,0 +1,5 @@
+# cp terraform.tfvars.example terraform.tfvars (gitignored)
+ssh_cidr = "106.219.71.228/32" # your IP: curl -s https://checkip.amazonaws.com
+# region              = "ap-south-1"
+# instance_type       = "c7i-flex.large"
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"
