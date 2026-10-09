@@ -26,7 +26,7 @@ RUN npm run build
 
 
 # ── Stage 2: runtime ────────────────────────────────────────
-FROM nginx:1.30-alpine AS runtime
+FROM nginx:1.31-alpine AS runtime
 
 # Alpine security fixes released after the base image was built (CI's Trivy gate fails on fixable HIGH/CRITICAL)
 RUN apk upgrade --no-cache
