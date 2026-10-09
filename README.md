@@ -455,7 +455,6 @@ connections, database retries and failed notifications. Metrics are aggregated a
 | `HighErrorRate` | more than 5% of requests fail for 5 minutes |
 | `SlowRequests` | p95 latency above 1 second for 10 minutes |
 
-![Prometheus alerts](diagrams-screenshots/prometheus-alerts.png)
 
 ---
 
