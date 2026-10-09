@@ -69,3 +69,12 @@ def test_nginx_trusts_forwarded_for_only_from_caddy():
     # The frontend joins `edge` first; a dynamic address could take Caddy's, and Caddy then fails to start (seen live).
     subnet, pool = (ipaddress.ip_network(re.search(rf"{k}:\s*([\d./]+)", compose).group(1)) for k in ("subnet", "ip_range"))
     assert ipaddress.ip_address(caddy_ip) in subnet and ipaddress.ip_address(caddy_ip) not in pool
+
+
+def test_deploy_fetches_every_monitoring_file_compose_mounts():
+    """deploy.sh downloads monitoring/ file by file; a new dashboard or rule file left off its list never reaches
+    the box, and Prometheus or Grafana starts without it."""
+    deploy = (ROOT / "infra" / "deploy.sh").read_text()
+    wanted = {str(p.relative_to(ROOT)) for p in (ROOT / "monitoring").rglob("*")
+              if p.is_file() and not p.name.endswith(".test.yml")}
+    assert wanted and all(f in deploy for f in wanted), sorted(f for f in wanted if f not in deploy)
