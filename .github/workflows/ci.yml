@@ -1,0 +1,202 @@
+# Tests, scans and image builds for every PR and every pushed v* tag; a tag then deploys (deploy.yml).
+# Plain pushes to main run nothing, so release with `git tag v1.2.3 && git push origin v1.2.3`.
+# Setup: .github/CICD_SETUP.md. Actions are pinned to commit SHAs; Dependabot updates them.
+name: CI
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BACKEND_IMAGE: aswinshine/nullify-backend
+  FRONTEND_IMAGE: aswinshine/nullify-frontend
+
+jobs:
+  backend:
+    name: Backend (ruff, pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nullify
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: nullify
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nullify" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Tests build their own `ims_test` database through Alembic (tests/conftest.py).
+      DB_HOST: localhost
+      DB_USER: nullify
+      DB_PASSWORD: ci-only-password
+      REDIS_HOST: localhost
+      APP_SECRET_KEY: ci-only-secret-key-not-used-anywhere-else
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          # No pip/npm cache: a tag run deploys, and caches are the one input a PR could poison. They saved
+          # little anyway, since tag runs can't restore caches made on other refs and main no longer runs.
+      - run: pip install -r requirements-dev.txt ruff==0.16.10
+      - run: ruff check app
+      - run: pytest -q --cov=app --cov-report=term --cov-fail-under=80
+
+  frontend:
+    name: Frontend (eslint, vitest, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22" # matches the frontend Dockerfile's build stage
+          package-manager-cache: false # see setup-python above
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  checks:
+    name: Security and config checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks reads the whole history
+          persist-credentials: false
+      # safe.directory: without it git refuses the mounted repo and gitleaks scans 0 commits yet exits 0.
+      # Accepted findings live in .gitleaksignore.
+      # A tag on an unmerged branch would deploy unreviewed code.
+      - name: Tag is on main
+        if: github.ref_type == 'tag'
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Secrets in git history (gitleaks)
+        run: >-
+          docker run --rm -v "$PWD:/repo"
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact --no-banner
+      - name: Python dependencies (pip-audit)
+        run: pipx run pip-audit==2.10.1 -r backend/requirements.txt
+      - name: Frontend dependencies (npm audit)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+      - name: Python code (bandit, medium and high)
+        run: pipx run bandit==1.9.4 -q -r backend/app -ll
+      - name: Workflows (zizmor)
+        run: pipx run zizmor==1.30.1 .github
+      - name: Deploy script (deploy_test.sh)
+        run: docker run --rm -v "$PWD/infra:/infra:ro" ubuntu:24.04 bash /infra/deploy_test.sh
+      - name: Terraform (fmt, validate)
+        run: |
+          tf() { docker run --rm -v "$PWD/infra:/infra" -w /infra hashicorp/terraform:1.14 "$@"; }
+          tf fmt -check
+          tf init -backend=false -input=false
+          tf validate
+      - name: Alert rules (promtool)
+        run: docker run --rm -v "$PWD/monitoring/prometheus:/t" -w /t --entrypoint promtool prom/prometheus:v3.5.0 test rules alerts.test.yml
+      - name: Compose file, every profile
+        env:
+          DB_PASSWORD: x
+          APP_SECRET_KEY: x
+        run: docker compose --profile tls --profile monitoring config -q
+
+  images:
+    name: Docker images (build, scan, push)
+    needs: [backend, frontend, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build backend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: backend
+          platforms: linux/amd64 # the EC2 box
+          load: true
+          tags: ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+      - name: Build frontend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: frontend
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+      # Fails on a CRITICAL or HIGH vulnerability that already has a fix (a base image or package bump).
+      - name: Scan backend image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan frontend image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Push images tagged with the commit
+        if: github.event_name == 'push'
+        run: |
+          docker push "$BACKEND_IMAGE:$GITHUB_SHA"
+          docker push "$FRONTEND_IMAGE:$GITHUB_SHA"
+
+  deploy:
+    name: Deploy
+    needs: images
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      id-token: write
+    # zizmor prefers `$/`, but actionlint 1.7.12 rejects it for a reusable workflow; no step runs before this call.
+    uses: ./.github/workflows/deploy.yml # zizmor: ignore[self-repository]
+    with:
+      sha: ${{ github.sha }}

@@ -1,102 +1,52 @@
-# Nullify — CI/CD Setup Guide
+# CI/CD setup
 
-## Pipeline Overview
+`workflows/ci.yml` runs on every PR and every pushed `v*` tag. Plain pushes to main run nothing, so small commits
+cost no CI minutes. To release: `git tag v1.2.3 && git push origin v1.2.3` (the tagged commit must be on main).
 
-```
-Push/PR → lint → test → security scan → docker build
-                                              ↓
-                                    (main branch only)
-                                              ↓
-                                       push to DockerHub
-                                              ↓
-                                        SSH into EC2
-                                              ↓
-                                       docker compose pull
-                                              ↓
-                                       migrate → deploy
-                                              ↓
-                                        health check
-```
 
-## Step 1 — Generate SSH key pair
+| Job | What it does |
+|---|---|
+| Backend | ruff, then the full pytest suite against Postgres 16 and Redis 7 (coverage must stay at 80% or more) |
+| Frontend | eslint, vitest, vite build |
+| Security and config checks | gitleaks (whole history), pip-audit, npm audit, bandit, zizmor (these workflows), the deploy script's tests, terraform fmt/validate, promtool alert tests, `docker compose config` |
+| Docker images | builds both images for linux/amd64, fails on a CRITICAL or HIGH CVE that has a fix (Trivy); on a tag, pushes `aswinshine/nullify-*:<commit sha>` to Docker Hub |
+| Deploy | tags only: `workflows/deploy.yml` with that commit |
 
-```bash
-ssh-keygen -t ed25519 -C "nullify-github-deploy" -f nullify_deploy -N ""
-# Creates: nullify_deploy (private) + nullify_deploy.pub (public)
-```
+`workflows/deploy.yml` assumes an AWS role through OIDC (no stored AWS keys), runs `infra/deploy.sh <sha>` on the
+box through SSM (port 22 stays closed to GitHub), then checks `https://<DOMAIN>/health`. The script pulls the
+commit's images, runs the migrations, restarts, and goes back to the previous version if the pull, the migration
+or the backend healthcheck fails.
 
-## Step 2 — Add public key to EC2
+## One-time setup
 
-```bash
-cat nullify_deploy.pub | ssh ubuntu@<EC2_IP> \
-  "mkdir -p /home/deploy/.ssh && cat >> /home/deploy/.ssh/authorized_keys"
-```
+1. **AWS:** `cd infra && terraform apply` creates the deploy role and lets the box take SSM commands. Note the
+   outputs `instance_id` and `github_deploy_role_arn`.
+2. **The box:** copy the server env file to `/opt/nullify/.env` (`infra/README.md` step 4). That is all the first
+   CI deploy needs: it downloads `docker-compose.yml` and pulls the images itself. CI never writes secrets; it
+   only sets `IMAGE_TAG` in that file.
+3. **Docker Hub:** Account settings, Personal access tokens, a token with Read & Write.
+4. **GitHub** (repo Settings):
+   - Environments, new environment `production`. Optional: add yourself as a required reviewer, so every deploy
+     waits for a click.
+     Deployment branches and tags: selected, branch `main` (manual rollbacks) and tag `v*` (releases).
+   - Secrets and variables, Actions:
 
-## Step 3 — Bootstrap EC2
+     | Kind | Name | Value |
+     |---|---|---|
+     | Secret | `DOCKERHUB_TOKEN` | the token from step 3 |
+     | Variable | `DOCKERHUB_USERNAME` | `aswinshine` |
+     | Variable | `AWS_REGION` | `ap-south-1` |
+     | Variable | `AWS_DEPLOY_ROLE_ARN` | the `github_deploy_role_arn` output |
+     | Variable | `EC2_INSTANCE_ID` | the `instance_id` output |
+     | Variable | `DOMAIN` | your domain, e.g. `ims.example.com` |
 
-```bash
-scp ec2-bootstrap-cicd.sh ubuntu@<EC2_IP>:~/
-ssh ubuntu@<EC2_IP> "sudo bash ~/ec2-bootstrap-cicd.sh"
-```
+   - Code security: turn on Dependabot alerts and security updates. `dependabot.yml` already opens weekly
+     update PRs for the actions (pinned to commit SHAs), pip, npm and the Dockerfile base images.
 
-## Step 4 — Copy compose files to EC2
+## Rolling back
 
-```bash
-scp docker-compose.yml deploy@<EC2_IP>:/opt/nullify/
-scp .env               deploy@<EC2_IP>:/opt/nullify/.env   # the single env file, production values
-```
+Actions tab, Deploy, Run workflow, paste the full SHA of an earlier release tag's commit (its images are on
+Docker Hub). Migrations are not undone, so pick a commit whose code works with the current schema.
 
-## Step 5 — Add GitHub Secrets
-
-Go to: GitHub repo → Settings → Secrets → Actions → New secret
-
-| Secret Name          | Value                                    |
-|----------------------|------------------------------------------|
-| `DOCKERHUB_USERNAME` | your DockerHub username                  |
-| `DOCKERHUB_TOKEN`    | DockerHub access token (not password)    |
-| `EC2_HOST`           | EC2 public IP or domain                  |
-| `EC2_USER`           | `deploy` (created by bootstrap script)   |
-| `EC2_SSH_KEY`        | contents of `nullify_deploy` (private)   |
-
-## Step 6 — Create GitHub Environment
-
-Go to: GitHub repo → Settings → Environments → New environment
-
-Name: `production`
-
-Optional: add protection rule requiring manual approval before deploy.
-
-## Step 7 — Push to main
-
-```bash
-git add .github/
-git commit -m "ci: add GitHub Actions CI/CD pipeline"
-git push origin main
-```
-
-Pipeline starts automatically.
-
-## Pipeline Behaviour
-
-| Event              | What happens                              |
-|--------------------|-------------------------------------------|
-| PR opened/updated  | lint + test + security + docker build     |
-| Push to `develop`  | lint + test + security + docker build     |
-| Push to `main`     | everything above + push images + deploy   |
-
-## Rollback
-
-If a deploy breaks production:
-
-1. GitHub → Actions → "Rollback" workflow → Run workflow
-2. Enter the image tag to roll back to (e.g. `a1b2c3d`)
-3. Type `ROLLBACK` to confirm
-4. Pipeline SSHes into EC2 and pulls the old image
-
-Get available tags from: `https://hub.docker.com/r/<username>/nullify-backend/tags`
-
-## DockerHub Token
-
-Generate at: https://hub.docker.com → Account Settings → Security → New Access Token
-
-Permissions needed: `Read, Write, Delete`
+The deploy fetches `infra/deploy.sh`, `docker-compose.yml` and the `monitoring/` config from raw.githubusercontent.com at that SHA, which
+works while the repo is public; a private repo would need a token on the box.

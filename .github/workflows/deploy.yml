@@ -1,0 +1,74 @@
+# Deploys one commit to the EC2 box: CI calls it after a pushed v* tag passes, and it can be run by hand from the
+# Actions tab with any earlier commit SHA to roll back. It runs infra/deploy.sh on the box through SSM,
+# authenticated by OIDC (no stored AWS keys), then checks https://DOMAIN/health from outside.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to deploy (an older one rolls back; its images must be on Docker Hub)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never stop a deploy halfway
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://${{ vars.DOMAIN }}
+    permissions:
+      id-token: write
+    steps:
+      - name: Check the SHA
+        env:
+          SHA: ${{ inputs.sha }}
+        run: '[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA"; exit 1; }'
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Run infra/deploy.sh on the box (SSM)
+        env:
+          SHA: ${{ inputs.sha }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          REPO: ${{ github.repository }}
+        run: |
+          script="curl -fsSL https://raw.githubusercontent.com/$REPO/$SHA/infra/deploy.sh -o /tmp/nullify-deploy.sh && bash /tmp/nullify-deploy.sh $SHA"
+          id=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+                 --comment "nullify deploy $SHA" \
+                 --parameters "$(jq -cn --arg c "$script" '{commands: [$c], executionTimeout: ["900"]}')" \
+                 --query Command.CommandId --output text)
+          echo "SSM command $id"
+          status=Pending
+          for _ in $(seq 1 90); do
+            sleep 10
+            status=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
+                       --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Pending|InProgress|Delayed) ;; *) break ;; esac
+          done
+          aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text
+          [ "$status" = Success ] || { echo "::error::deploy on the box ended with status $status"; exit 1; }
+      - name: Check https://DOMAIN/health
+        env:
+          DOMAIN: ${{ vars.DOMAIN }}
+        run: |
+          for _ in $(seq 1 12); do
+            curl -fsS "https://$DOMAIN/health" && exit 0
+            sleep 5
+          done
+          echo "::error::https://$DOMAIN/health did not answer"; exit 1

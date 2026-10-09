@@ -1,0 +1,31 @@
+# Weekly update PRs, so the SHA-pinned actions, Python and npm packages and base images do not go stale.
+# The 7-day cooldown skips releases younger than a week (time for a bad or hijacked release to be pulled).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directories: ["/backend", "/frontend"]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
