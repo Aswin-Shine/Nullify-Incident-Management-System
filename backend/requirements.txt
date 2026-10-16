@@ -9,7 +9,7 @@ pydantic==2.13.5
 pydantic-settings==2.2.1
 prometheus-fastapi-instrumentator==8.1.0
 opentelemetry-sdk==1.45.0
-opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-instrumentation-fastapi==0.66b1
 opentelemetry-instrumentation-asyncpg==0.66b0
 opentelemetry-exporter-otlp-proto-grpc==1.45.0
 python-json-logger==2.0.7
