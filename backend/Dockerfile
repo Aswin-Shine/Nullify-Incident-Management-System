@@ -5,7 +5,7 @@
 # ============================================================
 
 # ── Stage 1: builder ────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /build
 
@@ -25,7 +25,7 @@ RUN pip install --upgrade pip --quiet && \
 
 
 # ── Stage 2: runtime ────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 LABEL org.opencontainers.image.title="nullify-backend"
 LABEL org.opencontainers.image.description="Nullify IMS — FastAPI backend"
